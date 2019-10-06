@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?> 
+<library>
+    <catalogue category="technical books">
+        <book>
+            <ISBN>123</ISBN>
+            <title>OOp</title>
+            <author>Matt Weisfeld</author>
+        </book>
+        <book>
+            <ISBN>1234</ISBN>
+            <title>statistician</title>
+            <author>Edward Tufte</author>
+        </book>
+    </catalogue>
+    <catalogue category="cookery books">
+        <book>
+            <ISBN>12345</ISBN>
+            <title>irish Dishes</title>
+            <author>Jonathan Swift,</author>
+        </book>
+        <book>
+            <ISBN>123456</ISBN>
+            <title>Indian Dishes</title>
+            <author>Christine Manfield</author>
+        </book>
+    </catalogue>
+</library>
+
+
