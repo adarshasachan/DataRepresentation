@@ -1,0 +1,23 @@
+<html>
+    <head>
+        <title>This is e2.1</title>
+    </head>
+    <body>
+        <div id="myform">
+        firstname: <input type="text"name='firstname'/><br/>
+        lastname: <input type="text"name='lastname'/><br/>
+        age: <input type="text"name='age'/><br/>
+        <button onclick="dofom()">go</button>
+    </div>
+    <script>
+        function dofom(){
+            var employe={}
+            var form=document.getElementById("myform")
+            employe.firstname=form.querySelector("input[name='firstname'").value
+            employe.lastname=form.querySelector("input[name='lastname'").value
+            employe.age=form.querySelector("input[name='age'").value
+            console.log('form data'+ JSON.stringify(employe))
+        }
+    </script>
+    </body>
+</html>

@@ -1,0 +1,29 @@
+<html>
+    <head>
+        <title>This is e2.1</title>
+    </head>
+    <body>
+   <div id="div1" style="background-color: blueviolet">
+        <br/>
+        sometext <br/>
+        <button onclick="showdiv2()">showdiv2</button>
+    </div>
+    <div id="div2" style="background-color: red; display : none">
+            <br/>
+            div2 <br/>
+            <button onclick="showdiv1()">showdiv1</button>
+        </div>
+        
+    <script>
+        function showdiv2(){
+           document.getElementById("div1").style.display="none";
+           document.getElementById("div2").style.display="block";
+        }
+
+        function showdiv1(){
+           document.getElementById("div1").style.display="block";
+           document.getElementById("div2").style.display="none";
+        }
+    </script>
+    </body>
+</html>

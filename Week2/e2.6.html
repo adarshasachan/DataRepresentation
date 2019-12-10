@@ -1,0 +1,26 @@
+<html>
+    <head>
+        <title>This is e2.1</title>
+    </head>
+    <body>
+     <input type="number" onchange="chicknumber(this)"/>
+     <br/>
+     <div id="output">
+            current output
+     </div>
+     <script>
+         function chicknumber(inputvalue){
+             var value =inputvalue.value
+             if (value <12){
+                 document.getElementById("output").innerText="too low"
+             }else if (value >12) {
+                document.getElementById("output").innerText="too high"
+             }else {
+                document.getElementById("output").innerText="right" 
+             }
+         }
+     </script>
+    
+
+    </body>
+</html>
