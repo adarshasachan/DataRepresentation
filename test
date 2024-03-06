@@ -1,0 +1,357 @@
+Public Sub ClaimLookupNoSSL(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim oABN As CscXDocField
+   Dim oDom As New DOMDocument60
+   Dim sABN As String
+
+   On Error GoTo ErrorHandler
+
+   CallWebService(oDom, GetWebURL(pxDoc), pxDoc)
+   WriteToLogFile("ClaimLookup() web service call completed")
+
+   If oDom.parseError.errorCode = 0 Then
+
+      WriteToLogFile("ClaimLookup() errorCode = 0; mb_Abort = " & mb_Abort & "; mb_Success = " & mb_Success)
+
+      'If Not mb_Abort And mb_Success Then
+      If mb_Success Then
+
+         WriteToLogFile("ClaimLookup() Success")
+         Call PopulateClaimDetails(pxDoc, oDom)
+
+      Else
+         WriteToLogFile("ClaimLookup() Not Success")
+
+      End If
+   Else
+      WriteToLogFile("ClaimLookup() Error: " & oDom.parseError.srcText & vbCrLf & oDom.parseError.reason)
+      mb_Abort = True
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ClaimLookup() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+=======================
+Private Sub CallWebService(ByRef oDom As DOMDocument60, ByVal Url As String, ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sXML As String
+   Dim strEnvelope As String
+
+   On Error GoTo ErrorHandler
+
+   strEnvelope = QueryXml(pxDoc)
+
+   sXML = SubmitQuery(Url, strEnvelope)
+
+   'If mb_Success And Not mb_Abort Then
+   If mb_Success Then
+      oDom.async = False
+      oDom.resolveExternals = False
+      oDom.validateOnParse = False
+      Call oDom.setProperty("SelectionNamespaces", "xmlns:ns3='http://www.chartisinsurance.com/gct/services/ChartisClaimDetailsResponse' xmlns:soapenv='http://schemas.xmlsoap.org/soap/envelope/'")
+      oDom.loadXML sXML
+      'WriteToLogFile(sXML, False)
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("CallWebService() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+===================
+Private Function SubmitQuery(ByVal Url As String, ByVal strEnvelope As String) As String
+
+   Const ErrorPosition As String = "submitQuery"
+   Dim StatusMessage As String
+   Dim response As String
+
+   On Error GoTo ErrorHandler
+
+   Set m_XMLHTTP = New XMLHTTP60
+   m_XMLHTTP.Open "GET", Url, False
+   'm_XMLHTTP.Open "GET", Url, True
+   m_XMLHTTP.setRequestHeader "Content-Type", "text/xml"
+   m_XMLHTTP.send
+
+   'm_XMLHTTP.send (strEnvelope)
+
+   ' Check the response code - 200 is Ok
+   If m_XMLHTTP.status = 200 Then
+
+      m_XMLHTTP.Open "POST", Url, False
+      m_XMLHTTP.setRequestHeader "Content-Type", "text/xml"
+      m_XMLHTTP.send (strEnvelope)
+
+      'WriteToLogFile(m_XMLHTTP.responseText)
+
+      response = m_XMLHTTP.responseText
+      ' Make sure the response isn't html
+      If Not IsHTML(response) Then
+         mb_Success = True
+         SubmitQuery = response
+      Else
+         mb_Success = False
+         StatusMessage = "Error: " & response
+         WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+         SubmitQuery = ""
+         sWebServiceError = StatusMessage
+      End If
+   Else
+      mb_Success = False
+      StatusMessage = "Request Status: " & m_XMLHTTP.statusText & " (" & m_XMLHTTP.status & ")"
+      WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+      SubmitQuery = ""
+      sWebServiceError = StatusMessage
+   End If
+
+   Exit Function
+
+ErrorHandler:
+
+   mb_Abort = True
+   mb_Success = False
+   StatusMessage = "Request Status: " & m_XMLHTTP.statusText & "(" & m_XMLHTTP.status & ")"
+   sWebServiceError = StatusMessage
+   WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+
+End Function
+=========================
+Private Function IsHTML(ByVal Text As String) As Boolean
+   If Len(Text) > 4 Then
+      IsHTML = (InStr(LCase(Text), "html") > 0)
+   Else
+      IsHTML = False
+   End If
+End Function
+================
+Private Function IsWebSeviceException(ByRef oDom As DOMDocument60, ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+On Error GoTo ErrorHandler
+
+   Dim sException As String
+   Dim sDisplayError As String
+
+   sException = GetValueFromXML(oDom, "/soapenv:Envelope/soapenv:Body/soapenv:Fault/detail/ErrorInfo/errorCode")
+   sDisplayError = GetValueFromXML(oDom, "/soapenv:Envelope/soapenv:Body/soapenv:Fault/faultstring")
+
+   If sException <> "" Then
+      sWebServiceError = sDisplayError
+      WriteToLogFile("IsWebSeviceException() Error: " & sException)
+      IsWebSeviceException = True
+   Else
+      IsWebSeviceException = False
+   End If
+
+Exit Function
+ErrorHandler:
+   WriteToLogFile("IsWebSeviceException() Error: " & Err.Number & " - " & Err.Description)
+End Function
+===============================
+Private Function GetValueFromXML(ByVal oDom As DOMDocument60,ByVal Tag As String) As String
+
+   Dim oNode As IXMLDOMNodeList
+
+   On Error GoTo ErrorHandler
+
+   Set oNode = oDom.selectNodes(Tag)
+
+   If oNode.Length = 0 Then
+      GetValueFromXML = ""
+   Else
+      GetValueFromXML = oNode.Item(0).nodeTypedValue
+   End If
+
+   Set oNode = Nothing
+
+   Exit Function
+
+ErrorHandler:
+
+   WriteToLogFile("GetValueFromXML() Error: " & Err.Number & " - " & Err.Description)
+   Set oNode = Nothing
+
+End Function
+
+Private Function GetFeatureValueFromXML(ByVal oDom As DOMDocument60, ByVal Tag As String, ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim oNode As IXMLDOMNodeList
+
+   On Error GoTo ErrorHandler
+
+   Set oNode = oDom.selectNodes(Tag)
+
+   If oNode.Length = 0 Then
+      GetFeatureValueFromXML = ""
+
+   ElseIf oNode.Length > 1 Then
+
+      PopulateMultiFeatureCode(pxDoc, Tag, oNode)
+
+   Else
+      GetFeatureValueFromXML = oNode.Item(0).nodeTypedValue
+   End If
+
+   Set oNode = Nothing
+
+   Exit Function
+
+ErrorHandler:
+
+   WriteToLogFile("GetFeatureValueFromXML() Error: " & Err.Number & " - " & Err.Description)
+   Set oNode = Nothing
+
+End Function
+=============
+Private Sub PopulateClaimDetails(ByVal pxDoc As CASCADELib.CscXDocument, ByRef oDom As DOMDocument60)
+
+   Dim oTable As CscXDocTable
+   Dim oRow As CscXDocTableRow
+   Dim sValue As String
+   Dim sFund As String
+   Dim sConcession As String
+   Dim asValues() As String
+   Dim asFunds() As String
+   Dim asConcessions() As String
+   Dim n As Integer
+
+   Dim strMainNode As String
+
+   On Error GoTo ErrorHandler
+
+
+   strMainNode = "/soapenv:Envelope/soapenv:Body/ns3:ClaimDetailsResponse/ns3:ClaimDetails"
+
+   If Not IsWebSeviceException(oDom, pxDoc) Then
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:ClaimNumber")
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text = GetValueFromXML(oDom, strMainNode & "/ns3:AEGISClaimNo")
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:FeatureCode", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Valid = True
+
+      
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("PopulateClaimDetails() Error: " & Err.Number & " - " & Err.Description)
+
+End Sub
+==================
+Private Function QueryXml(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   'Create the SOAP Envelope
+   Dim strEnvelope As String
+   Dim sCountryCode As String
+
+   sCountryCode = UCase(getBatchField("CountryCode", pxDoc))
+
+   If UCase(Project.ScriptVariables.ItemByName(SCRIPT_VAR_TEST_MODE).Value) = UCase("True") Then
+      sCountryCode = "ID"
+   Else
+      sCountryCode = UCase(getBatchField("CountryCode", pxDoc))
+   End If
+
+   strEnvelope = "<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/""
+   strEnvelope = strEnvelope + " xmlns:char=""http://www.chartisinsurance.com/gct/services/ChartisClaimDetailsRequest""
+   strEnvelope = strEnvelope +   " xmlns:com=""http://www.chartisinsurance.com/gct/services/commonHeader""> "
+   strEnvelope = strEnvelope +   "<soapenv:Header/>"
+   strEnvelope = strEnvelope +   " <soapenv:Body> "
+   strEnvelope = strEnvelope +   "   <char:ClaimDetailsRequest>"
+   strEnvelope = strEnvelope +   "      <char:requestHeader>"
+   strEnvelope = strEnvelope +   "         <com:id>?</com:id>"
+   strEnvelope = strEnvelope +   "         <com:requestApplicationID>?</com:requestApplicationID>"
+   strEnvelope = strEnvelope +   "         <com:requestMessageID>?</com:requestMessageID>"
+   strEnvelope = strEnvelope +   "         <com:cmdType>?</com:cmdType>"
+   strEnvelope = strEnvelope +   "         <com:cmdMode>?</com:cmdMode>"
+   strEnvelope = strEnvelope +   "         <com:echoBack>False</com:echoBack>"
+   strEnvelope = strEnvelope +   "      </char:requestHeader>"
+   strEnvelope = strEnvelope +   "      <char:applicationContext>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:businessSegment>?</com:businessSegment>"
+   strEnvelope = strEnvelope +   "         <com:country>?</com:country>"
+   strEnvelope = strEnvelope +   "         <com:language>EN</com:language>"
+   strEnvelope = strEnvelope +   "         <com:lineOfBusiness>?</com:lineOfBusiness>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:requestType>?</com:requestType>"
+   strEnvelope = strEnvelope +   "         <com:systemDate>?</com:systemDate>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:timeZone>?</com:timeZone>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:requestProviderVersion>1.0</com:requestProviderVersion>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:providerSystemID>?</com:providerSystemID>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:providerSystemPassword>?</com:providerSystemPassword>"
+   strEnvelope = strEnvelope +   "      </char:applicationContext>"
+   strEnvelope = strEnvelope +   "      <char:ClaimNumber>" & pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text & "</char:ClaimNumber>"
+   strEnvelope = strEnvelope +   "      <char:CountryCode>" & sCountryCode & "</char:CountryCode>"
+   strEnvelope = strEnvelope +   "      <!--Optional:-->"
+   strEnvelope = strEnvelope +   "      <char:FeatureCode>" & pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text & "</char:FeatureCode>"
+   strEnvelope = strEnvelope +   "      <char:LOB></char:LOB>"   'LOB is not input parameter
+   strEnvelope = strEnvelope +   "   </char:ClaimDetailsRequest>"
+   strEnvelope = strEnvelope +   "</soapenv:Body>"
+   strEnvelope = strEnvelope +   "</soapenv:Envelope>"
+
+   QueryXml = strEnvelope
+   'WriteToLogFile(strEnvelope)
+
+End Function
+======
+Public Function getBatchField(FieldName, ByVal pxDoc As CASCADELib.CscXDocument) As String
+   Dim Folder As CscXFolder
+   Set Folder = pxDoc.ParentFolder
+
+   While Not Folder.IsRootFolder
+      Set Folder = Folder.ParentFolder
+   Wend
+
+   If Folder.XValues.ItemExists("AC_FIELD_" & FieldName) Then
+      getBatchField=Folder.XValues.ItemByName("AC_FIELD_" & FieldName).Value
+   Else
+      getBatchField=""
+   End If
+End Function
+==================
+Public Sub ClaimLookupNoSSL(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim oABN As CscXDocField
+   Dim oDom As New DOMDocument60
+   Dim sABN As String
+
+   On Error GoTo ErrorHandler
+
+   CallWebService(oDom, GetWebURL(pxDoc), pxDoc)
+   WriteToLogFile("ClaimLookup() web service call completed")
+
+   If oDom.parseError.errorCode = 0 Then
+
+      WriteToLogFile("ClaimLookup() errorCode = 0; mb_Abort = " & mb_Abort & "; mb_Success = " & mb_Success)
+
+      'If Not mb_Abort And mb_Success Then
+      If mb_Success Then
+
+         WriteToLogFile("ClaimLookup() Success")
+         Call PopulateClaimDetails(pxDoc, oDom)
+
+      Else
+         WriteToLogFile("ClaimLookup() Not Success")
+
+      End If
+   Else
+      WriteToLogFile("ClaimLookup() Error: " & oDom.parseError.srcText & vbCrLf & oDom.parseError.reason)
+      mb_Abort = True
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ClaimLookup() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+===============
