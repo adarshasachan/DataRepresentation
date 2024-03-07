@@ -1,0 +1,4599 @@
+Public Sub WriteToLogFile(ByVal Message As String, Optional ByVal DisplayMessage As Boolean = True)
+
+   Dim FSO As New FileSystemObject
+   Dim ts As TextStream
+   Dim bCreate As Boolean
+
+   Dim sLog As String
+   Dim nMonth As Integer
+   Dim nYear As Integer
+
+   On Error Resume Next
+
+   ' check if logging enabled
+   If Project.ScriptVariables.ItemByName(SCRIPT_VAR_ENABLE_LOGGING).Value = "TRUE" Then
+      nMonth = Format(Month(Now), "00")
+      nYear = Year(Now)
+
+      sLog = Project.ScriptVariables.ItemByName(SCRIPT_VAR_LOG_FILE).Value
+      sLog = sLog & "_" & CStr(nMonth) & CStr(nYear) & ".log"
+
+      ' check if log file needs to be created
+      bCreate =  Not FSO.FileExists(sLog)
+
+      ' write to log
+      Set ts = FSO.OpenTextFile(sLog, ForAppending, bCreate)
+      ts.WriteLine(Now & vbTab & "ScriptExecutionMode:" & Trim(CStr(Project.ScriptExecutionMode)) & " ScriptExecutionInstance:" & Trim(CStr(Project.ScriptExecutionInstance)) & " Message: " & Message)
+      ts.Close
+   End If
+
+End Sub
+
+
+Private Sub SpaceRemovalFormatting_FormatField(ByVal FieldText As String, FormattedText As String, ErrDescription As String, ValidFormat As Boolean)
+
+   If Len(FieldText) = 0 Then
+      ValidFormat = False
+      ErrDescription = "Field must not be empty"
+   Else
+      ' remove special characters "-/." from string
+      FormattedText = Replace(FieldText, " ", "")
+      FormattedText = Replace(FormattedText, "/", "")
+      FormattedText = Replace(FormattedText, ".", "")
+      ValidFormat = True
+   End If
+
+End Sub
+
+
+Public Function getBatchField(FieldName, ByVal pxDoc As CASCADELib.CscXDocument) As String
+   Dim Folder As CscXFolder
+   Set Folder = pxDoc.ParentFolder
+
+   While Not Folder.IsRootFolder
+      Set Folder = Folder.ParentFolder
+   Wend
+
+   If Folder.XValues.ItemExists("AC_FIELD_" & FieldName) Then
+      getBatchField=Folder.XValues.ItemByName("AC_FIELD_" & FieldName).Value
+   Else
+      getBatchField=""
+   End If
+End Function
+
+Public Function getStandardBatchField(FieldName, ByVal pxDoc As CASCADELib.CscXDocument) As String
+   Dim Folder As CscXFolder
+   Set Folder = pxDoc.ParentFolder
+
+   While Not Folder.IsRootFolder
+      Set Folder = Folder.ParentFolder
+   Wend
+
+   If Folder.XValues.ItemExists("AC_" & FieldName) Then
+      getStandardBatchField=Folder.XValues.ItemByName("AC_" & FieldName).Value
+   Else
+      getStandardBatchField=""
+   End If
+End Function
+
+
+Private Sub SplitBatchByCoverSheet(ByVal pXRootFolder As CASCADELib.CscXFolder)
+On Error GoTo ErrorHandler
+
+   Dim i, s, y, x As Long
+   Dim sBatchTag As String
+   Dim sModuleName As String
+   Dim sBatchOriName As String
+   Dim sModuleNameOriginalBatch As String
+   Dim intCount As Integer
+
+   Dim oXDocInfo As CASCADELib.CscXDocInfo
+   Dim sXDocInfo As CASCADELib.CscXDocInfo
+
+   Set oXDocInfo = pXRootFolder.GetDocInfoByGlobalIndex(0)
+   sBatchOriName =  getStandardBatchField("BATCH_NAME", oXDocInfo.XDocument)
+
+      y = pXRootFolder.GetTotalDocumentCount - 1
+      WriteToLogFile ("total doc count = " & y)
+
+      For i = pXRootFolder.GetTotalDocumentCount - 1 To 0 Step - 1
+
+         Set oXDocInfo = pXRootFolder.GetDocInfoByGlobalIndex(i)
+
+         If oXDocInfo.XDocument.Fields.ItemByName("Split").Text = "" Then
+
+            WriteToLogFile ("Document number : " & i)
+
+            sBatchOriName =  getStandardBatchField("BATCH_NAME", oXDocInfo.XDocument)
+
+            If oXDocInfo.XDocument.Fields.ItemByName(FIELD_BARCODE_SEPARATOR).Text = "66665555" Then
+
+               WriteToLogFile("barcode found")
+
+               For s = i To y
+
+                  sBatchTag = "Split - " & i+1
+                  WriteToLogFile("sBatchTag = " & sBatchTag)
+
+                  Set sXDocInfo = pXRootFolder.GetDocInfoByGlobalIndex(s)
+                  '## Document will be placed in a new batch "sBatchTag". This group can be considered to be a new group initially.
+                  sXDocInfo.XValues.Set("KTM_DOCUMENTROUTING", sBatchTag)
+                  sXDocInfo.XDocument.Fields.ItemByName("Split").Text = "True"
+
+               Next s
+
+               y = i - 1
+
+               '## Rename the child batch
+               '## If this step is skipped, then the bacth will be automatically named by Capture
+               'If InStr(sBatchOriName, sBatchTag) > 0 Then
+                  'pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_BATCHNAME_" & sBatchTag, sBatchOriName)
+               'Else
+                  pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_BATCHNAME_" & sBatchTag, sBatchOriName & " " & sBatchTag)
+               'End If
+
+               sModuleName = "KTM.Server2"
+               '## New batch "sBatchTag" will be routed to module "sModuleName"
+               pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_" & sBatchTag, sModuleName)
+
+            End If
+         End If
+
+      Next i
+
+      sModuleNameOriginalBatch = "KTM.Server2"
+      '## Original Batch will be routed To module "sModuleNameOriginalBatch"
+      pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_THISBATCH", sModuleNameOriginalBatch)
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("SplitBatchByCoverSheet() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidClaimByPassValidation(ByVal pXRootFolder As CASCADELib.CscXFolder)
+   On Error GoTo ErrorHandler
+
+   Dim bRoute As Boolean
+   Dim n As Long
+   Dim strLOB As String
+   Dim NextDoc As CscXDocument
+   Dim thisDoc As CscXDocument
+
+   Dim bCoverSheetPass As Boolean
+   Dim bDocSeparatorPass As Boolean
+
+
+   Dim bClaimantName1 As Boolean
+
+   Dim bClaimantName2 As Boolean
+
+   Dim s1stClaim, s2ndClaim, s3rdClaim As String
+   Dim sClaimNo As String
+
+   Dim bMultiClaim As Boolean
+
+   bDocSeparatorPass = True
+
+   Dim sWorklist As String
+
+   If bRoute = False Then
+      bRoute = ValidClaimRoute(pXRootFolder.DocInfos(0).XDocument)
+
+   End If
+
+
+   If bRoute = True Then
+
+      '1st loop to check all Claim number found in all documents
+      For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+         Set thisDoc = pXRootFolder.DocInfos(n).XDocument
+
+         If n = 0 Then
+
+            If thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Alternatives.Count > 1 Then
+               'multiple claim numbers found, do nothing
+               bMultiClaim = True
+            Else
+               s1stClaim = Trim(thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+            End If
+
+         Else
+
+            If Trim(s2ndClaim) = "" Then
+               If thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Alternatives.Count > 1 Then
+                  'multiple claim numbers found, do nothing
+                  bMultiClaim = True
+               Else
+
+                  If Trim(thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text) <> "" Then
+                     s2ndClaim = Trim(thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+                     If Trim(s1stClaim) <> "" Then
+                        bMultiClaim = True
+                     End If
+                  End If
+               End If
+
+            End If
+
+            If Trim(s2ndClaim) <> "" Then
+               If thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Alternatives.Count > 1 Then
+                  'multiple claim numbers found, do nothing
+                  bMultiClaim = True
+               Else
+
+                  If Trim(thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text) <> "" Then
+                     s3rdClaim = Trim(thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+                     If Trim(s1stClaim) <> "" Or Trim(s2ndClaim) <> "" Then
+                        bMultiClaim = True
+                     End If
+                  End If
+
+               End If
+            End If
+         End If
+      Next n
+
+      If bMultiClaim = False Then
+         'if cover sheet document doesnt have the claim number, continue looking in other docs
+
+         If Trim(s1stClaim) <> "" Then
+            sClaimNo = s1stClaim
+         ElseIf Trim(s2ndClaim) <> "" Then
+            sClaimNo = s2ndClaim
+         ElseIf Trim(s3rdClaim) <> "" Then
+            sClaimNo = s3rdClaim
+         End If
+
+         Set thisDoc = pXRootFolder.DocInfos(0).XDocument
+
+         'Retrieve AEGIS value
+         thisDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = sClaimNo
+
+         ClaimLookup(thisDoc)
+         WriteToLogFile("ClaimLookup is called in Batch Close event")
+
+         'If no worklist is checked
+         sWorklist = Trim(thisDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text)
+         If Len(sWorklist) = 0 Then
+            thisDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = "EXAMINER WORKLIST"
+            SetRouteID(thisDoc)
+            SetOneClaimRoutID(thisDoc)
+         End If
+
+         For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+            If n > 0 Then
+               'Copy 1st document values to the rest of documents
+               Set NextDoc = pXRootFolder.DocInfos(n).XDocument
+               CopyFieldsToDocuments(pXRootFolder.DocInfos(0).XDocument, NextDoc)
+            End If
+
+            'Match retrieve AEGIS value with Ocred data
+            MatchAEGISOnDocument(pXRootFolder.DocInfos(n).XDocument)
+         Next n
+      Else
+
+         For n = 0 To pXRootFolder.DocInfos.Count - 1
+            ClearWebFields(pXRootFolder.DocInfos(n).XDocument)
+         Next n
+
+      End If
+
+      If bMultiClaim = False Then
+
+         For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+            Set thisDoc = pXRootFolder.DocInfos(n).XDocument
+
+
+            If n = 0 Then
+
+               'If document type is valid
+               If thisDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = True And _
+                  Trim(thisDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> "" And _
+                  Trim(thisDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) <> "" Then
+
+                  'if valid claim found with 1 feature presents
+                  If Len(thisDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) > 0 And _
+                     Len(thisDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text) > 0 Then
+
+                     bCoverSheetPass = True
+
+                     'if claimant first name and claimant last name matches (only)
+                     If UCase(thisDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Text) = UCase(thisDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text) Then
+                        bClaimantName1 = True
+                     End If
+
+
+                     If UCase(thisDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Text) = UCase(thisDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text) Then
+                        'Len(thisDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text) > 0 Then
+                        bClaimantName2 = True
+                     End If
+
+                  End If
+
+               End If
+
+               strLOB = Trim(UCase(thisDoc.Fields.ItemByName(FIELD_LOB_CODE).Text))
+            End If
+
+            If Len(strLOB) > 0 Then
+               Batch.ChangeClass (strLOB, pXRootFolder.DocInfos(n), True)
+               WriteToLogFile("Batch Closed reclassify Doc Class: " & pXRootFolder.DocInfos(n).ExtractionClass)
+            End If
+
+            If n > 0 Then
+
+               If thisDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = True And _
+                     Trim(thisDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> "" And _
+                     Trim(thisDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) <> "" Then
+
+                  bDocSeparatorPass = True
+
+                  If UCase(thisDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Text) = UCase(thisDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text) Then
+                     bClaimantName1 = True
+                  End If
+
+                  If UCase(thisDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Text) = UCase(thisDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text) Then
+                     bClaimantName2 = True
+                  End If
+               Else
+                  bDocSeparatorPass = False
+                  Exit For
+               End If
+
+            End If
+
+            thisDoc.Fields.ItemByName(FIELD_BATCH_NAME).Text = CreateBatchName(thisDoc)
+            SetOneClaimRoutID(pXRootFolder.DocInfos(n).XDocument)
+            FormatCMFieldValue(pXRootFolder.DocInfos(n).XDocument)
+            FormatCMFieldDateValue(pXRootFolder.DocInfos(n).XDocument)
+            TruncateFields(pXRootFolder.DocInfos(n).XDocument)
+
+         Next n
+
+
+      Else
+         pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_CLAIM_NUMBER).ErrorDescription = "Multiple Claim Numbers are found on this batch"
+         pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_CLAIM_NUMBER).Valid = False
+      End If
+
+
+      If bDocSeparatorPass = True And bCoverSheetPass = True And bClaimantName1 = True And bClaimantName2 = True Then
+         WriteToLogFile("ValidClaimByPassValidation() IS TRUE")
+         'Skip KTM Validation Queue
+         pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_THISBATCH", "KC.PDF")
+         WriteToLogFile("ValidClaimByPassValidation() is passed")
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidClaimByPassValidation() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub EmailByPassValidation(ByVal pXRootFolder As CASCADELib.CscXFolder)
+   On Error GoTo ErrorHandler
+
+   Dim bRoute As Boolean
+   Dim n As Long
+   Dim strLOB As String
+   Dim NextDoc As CscXDocument
+
+   If bRoute = False Then
+      bRoute = ValidEmailRoute(pXRootFolder.DocInfos(0).XDocument)
+   End If
+
+   If bRoute = True Then
+      WriteToLogFile("EmailByPassValidation() IS TRUE")
+
+      For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+         pXRootFolder.DocInfos(n).XDocument.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+         pXRootFolder.DocInfos(n).XDocument.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_EMAIL_CORRESPONDENCE
+         pXRootFolder.DocInfos(n).XDocument.Fields.ItemByName(FIELD_PRIORITY).Text = "010"
+
+         If n = 0 Then
+            pXRootFolder.DocInfos(n).XDocument.Fields.ItemByName(FIELD_BATCH_NAME).Text = CreateBatchName(pXRootFolder.DocInfos(0).XDocument)
+            strLOB = Trim(UCase(pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_LOB_CODE).Text))
+         End If
+
+         If Len(strLOB) > 0 Then
+            'sReturned = SearchKTMDatabaseByCode(strLOB, DB_LOB, KTM_DB_LOB_COL_CODE, KTM_DB_LOB_COL_TYPE)
+            Batch.ChangeClass (strLOB, pXRootFolder.DocInfos(n), True)
+            WriteToLogFile("Batch Closed reclassify Doc Class: " & pXRootFolder.DocInfos(n).ExtractionClass)
+         End If
+
+         If n > 0 Then
+            'Copy 1st document values to the rest of documents
+            Set NextDoc = pXRootFolder.DocInfos(n).XDocument
+            CopyFieldsToDocuments(pXRootFolder.DocInfos(0).XDocument, NextDoc)
+         End If
+
+         SetOneClaimRoutID(pXRootFolder.DocInfos(n).XDocument)
+         FormatCMFieldValue(pXRootFolder.DocInfos(n).XDocument)
+         FormatCMFieldDateValue(pXRootFolder.DocInfos(n).XDocument)
+         TruncateFields(pXRootFolder.DocInfos(n).XDocument)
+      Next
+
+      'Skip KTM Validation Queue
+      'pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_THISBATCH", "Kofax.AdvReports.DataExport")
+      pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_THISBATCH", "KC.Export")
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("EmailByPassValidation() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Sub CopyAttachmentToEmailBody(ByVal pXRootFolder As CASCADELib.CscXFolder)
+
+On Error GoTo ErrorHandler
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pXRootFolder.DocInfos(0).XDocument)))
+
+   Dim n As Long
+   Dim i As Long
+
+   Dim p1XDocInfo As CscXDocInfo
+   Dim n1PageCount As Long
+
+   Dim pXDocInfo As CscXDocInfo
+   Dim nPageCount As Long
+
+   If UCase(sSource) = "EMAIL" Then
+
+       For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+         Set pXDocInfo= pXRootFolder.DocInfos(n)
+
+         If n = 0 Then
+            Set p1XDocInfo = pXRootFolder.DocInfos(n)
+            n1PageCount = pXRootFolder.DocInfos(n).PageCount
+
+         Else
+            nPageCount = pXDocInfo.PageCount
+            n1PageCount = p1XDocInfo.PageCount
+
+            For i = 0 To nPageCount -1
+               'CY: Changed @ 13th Dec 2012 due to KIC 2.1 upgrade that includes nested emails
+               'Batch.CopyPageTo(pXDocInfo, i, p1XDocInfo, i+1)
+               Batch.CopyPageTo(pXDocInfo, i, p1XDocInfo, n1PageCount+i)
+            Next i
+
+            'p1XDocInfo.XDocument.InsertPages(pXDocInfo.XDocument, n1PageCount, 0, nPageCount)
+         End If
+
+       Next n
+   End If
+
+Exit Sub
+
+
+ErrorHandler:
+   WriteToLogFile("CopyAttachmentToEmailBody() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidFolderByPassValidation(ByVal pXRootFolder As CASCADELib.CscXFolder)
+On Error GoTo ErrorHandler
+
+   Dim NextDoc As CscXDocument
+   Dim bRoute As Boolean
+   Dim strLOB As String
+   Dim n As Long
+
+   If bRoute = False Then
+      bRoute = ValidRoute(pXRootFolder.DocInfos(0).XDocument)
+   End If
+
+   If bRoute = True Then
+
+      For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+         If n = 0 Then
+            pXRootFolder.DocInfos(n).XDocument.Fields.ItemByName(FIELD_BATCH_NAME).Text = CreateBatchName(pXRootFolder.DocInfos(0).XDocument)
+            DefaultFieldsValue(pXRootFolder.DocInfos(n).XDocument)
+            strLOB = Trim(UCase(pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_LOB_CODE).Text))
+         End If
+
+         If Len(strLOB) > 0 Then
+            'sReturned = SearchKTMDatabaseByCode(strLOB, DB_LOB, KTM_DB_LOB_COL_CODE, KTM_DB_LOB_COL_TYPE)
+            Batch.ChangeClass (strLOB, pXRootFolder.DocInfos(n), True)
+            WriteToLogFile("Batch Closed reclassify Doc Class: " & pXRootFolder.DocInfos(n).ExtractionClass)
+         End If
+
+         If n > 0 Then
+            'Copy 1st document values to the rest of documents
+            Set NextDoc = pXRootFolder.DocInfos(n).XDocument
+            CopyFieldsToDocuments(pXRootFolder.DocInfos(0).XDocument, NextDoc)
+            'this is to default Document Type value if the extraction value on 2nd Document onwards is incorrect
+            DefaultFieldsValueDocument(pXRootFolder.DocInfos(n).XDocument)
+         End If
+
+         SetOneClaimRoutID(pXRootFolder.DocInfos(n).XDocument)
+         FormatCMFieldValue(pXRootFolder.DocInfos(n).XDocument)
+         FormatCMFieldDateValue(pXRootFolder.DocInfos(n).XDocument)
+         TruncateFields(pXRootFolder.DocInfos(n).XDocument)
+      Next
+
+      pXRootFolder.XValues.Set("KTM_DOCUMENTROUTING_QUEUE_THISBATCH", "KC.PDF")
+   End If
+
+
+   'Not Used
+   'DeleteScannedSheet(pXRootFolder)
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidFolderByPassValidation() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Sub SetOCWorklistKTMServer2(ByVal pXRootFolder As CASCADELib.CscXFolder)
+
+On Error GoTo ErrorHandler
+
+   Dim n As Long
+   Dim pxDoc As CscXDocument
+
+   For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+      Set pxDoc = pXRootFolder.DocInfos(n).XDocument
+
+      SetOneClaimRoutID(pxDoc)
+
+   Next n
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("SetOCWorklistKTMServer2() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub Batch_Close(ByVal pXRootFolder As CASCADELib.CscXFolder, ByVal CloseMode As CASCADELib.CscBatchCloseMode)
+
+On Error GoTo ErrorHandler
+
+   Dim n As Long
+   Dim sSource As String
+   Dim pxDoc As CscXDocument
+   Dim NextDoc As CscXDocument
+
+   Dim strLOB As String
+   Dim sReturned As String
+
+   Dim bRoute As Boolean
+
+   sSource = Trim(UCase(getBatchField("KICService", pXRootFolder.DocInfos(0).XDocument)))
+
+   Select Case Project.ScriptExecutionMode
+   Case CscScriptModeServer
+
+      'this part is only executed during server processing
+      If Project.ScriptExecutionInstance = 1 And CloseMode = CscBatchCloseMode.CscBatchCloseFinal Then
+           'if scanned paper document
+            If Len(sSource) = 0 Then
+               SplitBatchByCoverSheet(pXRootFolder)
+
+            Else
+
+               'Native attachments for LAN/Email Sweep
+               Call KfxUpdateImagePath(pXRootFolder, FIELD_ORIGINAL_IMAGE, CloseMode)
+
+               If UCase(sSource) = "EMAIL" Then
+                  'Not required since release Native attachment
+                  'CopyAttachmentToEmailBody(pXRootFolder)
+                  EmailByPassValidation(pXRootFolder)
+               End If
+            End If
+
+       End If
+
+      'executed during ktm server 2
+      If Project.ScriptExecutionInstance = 2 Then
+
+         'if scanned paper document
+         If Len(sSource) = 0 Then
+            ValidClaimByPassValidation(pXRootFolder)
+            ValidFolderByPassValidation(pXRootFolder)
+
+            SetOCWorklistKTMServer2(pXRootFolder)
+         End If
+
+      End If
+
+   Case CscScriptModeValidation
+
+
+      If Project.ScriptExecutionInstance = 1 And CloseMode = CscBatchCloseMode.CscBatchCloseFinal Then
+
+         bValFinalBatchClosed = True
+
+         For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+            Set pxDoc = pXRootFolder.DocInfos(n).XDocument
+
+            strLOB = Trim(UCase(pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_LOB_CODE).Text))
+
+            If bRoute = False Then
+               bRoute = ValidRoute(pXRootFolder.DocInfos(0).XDocument)
+            End If
+
+            If bRoute = True Then
+               If n = 0 Then
+                  DefaultFieldsValue(pxDoc)
+               Else
+                  'Copy 1st document values to the rest of documents
+
+                  'DefaultFieldsValue(pXDoc)
+                  Set NextDoc = pXRootFolder.DocInfos(n).XDocument
+                  CopyFieldsToDocuments(pXRootFolder.DocInfos(0).XDocument, NextDoc)
+
+                  NextDoc.Save()
+               End If
+            End If
+
+            pxDoc.Fields.ItemByName(FIELD_BATCH_NAME).Text = CreateBatchName(pxDoc)
+            SetOneClaimRoutID(pxDoc)
+            FormatCMFieldValue(pxDoc)
+            FormatCMFieldDateValue(pxDoc)
+            TruncateFields(pxDoc)
+
+            If Len(strLOB) > 0 Then
+               'sReturned = SearchKTMDatabaseByCode(strLOB, DB_LOB, KTM_DB_LOB_COL_CODE, KTM_DB_LOB_COL_TYPE)
+               Batch.ChangeClass (strLOB, pXRootFolder.DocInfos(n), True)
+               WriteToLogFile("Batch Closed reclassify Doc Class: " & pXRootFolder.DocInfos(n).ExtractionClass)
+            End If
+
+         Next n
+
+      End If
+
+   End Select
+
+   WriteToLogFile("Batch_Close() Batch Name: " & getStandardBatchField("BATCH_NAME", pXRootFolder.DocInfos(0).XDocument))
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("Batch_Close() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub Batch_Open(ByVal pXRootFolder As CASCADELib.CscXFolder)
+
+bValFinalBatchClosed = False
+bFirstDocValidated = False
+
+
+WriteToLogFile("Batch_Open() Batch Name: " & getStandardBatchField("BATCH_NAME", pXRootFolder.DocInfos(0).XDocument))
+
+' issue scan batch was going STP
+Select Case Project.ScriptExecutionMode
+Case CscScriptModeValidation
+
+    Dim sSource As String
+   Dim pxDoc As CscXDocument
+   Dim n As Long
+
+   Set pxDoc = pXRootFolder.DocInfos(0).XDocument
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+   If Len(sSource) = 0 Then
+      pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid=False
+      pXRootFolder.DocInfos(0).XDocument.Fields.ItemByName(FIELD_DOCUMENT_TYPE).ExtractionConfident=False
+
+      End If
+
+   End Select
+
+End Sub
+
+Private Sub DeleteScannedSheet(ByVal pXRootFolder As CASCADELib.CscXFolder)
+
+On Error GoTo ErrorHandler
+
+   Dim sSource As String
+   Dim pxDoc As CscXDocument
+   Dim n As Long
+
+   Set pxDoc = pXRootFolder.DocInfos(0).XDocument
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   'if scanned document
+   If Len(sSource) = 0 Then
+      For n = 0 To pXRootFolder.DocInfos.Count - 1
+         'Delete 1st page of every document
+         Batch.DeletePage(pXRootFolder.DocInfos(n), 0)
+      Next n
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("DeleteScannedSheet() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Function DefaultFieldsValue(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   On Error GoTo ErrorHandler
+
+   Dim sLOB As String
+   sLOB = Trim(UCase(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text))
+
+   Dim dbLob, dbLobCode As String
+
+   Dim sDefaultWorklist As String
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_RESEARCH Then
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AH
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) = "" Then
+         pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_UNCLASSIFIED
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = PRIORITY_UNCLASSIFIED
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = "HK_RSCH_NEW"
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = FOLDER_RESEARCH
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Text = FOLDER_RESEARCH
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Text = FOLDER_RESEARCH
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Text = "999999998"
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text = FOLDER_RESEARCH
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text = FOLDER_RESEARCH
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = "02/02/1112"
+   End If
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_DEFAULT Then
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = False Then
+
+         If Trim(pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text) = "" Then
+            pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AH
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = "HK_AHPA_FNOL"
+         Else
+
+            sDefaultWorklist = pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text
+            dbLob = SearchKTMDatabaseByCode(Trim(sDefaultWorklist), DB_SHARED_WORKLIST, KTM_DB_SHARED_WORKLIST_COL_PROCESSID, KTM_DB_SHARED_WORKLIST_COL_LOB)
+            'dbLobCode = SearchKTMDatabaseByCode(dbLob, DB_LOB, KTM_DB_LOB_COL_TYPE, KTM_DB_LOB_COL_CODE)
+
+            pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = UCase(Trim(dbLob))
+         End If
+
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text) = "" Then
+         sDefaultWorklist = SearchKTMDatabaseByCode(sLOB, DB_SHARED_WORKLIST, KTM_DB_SHARED_WORKLIST_COL_LOB, KTM_DB_SHARED_WORKLIST_COL_PROCESSID)
+         pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = sDefaultWorklist
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) = "" Then
+         pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_CLAIMS_NOTIFICATION_FNOL
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = "999"
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = FOLDER_DEFAULT
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Text = FOLDER_DEFAULT
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Text = FOLDER_DEFAULT
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Text = "999999999"
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text = FOLDER_DEFAULT
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text = FOLDER_DEFAULT
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = "01/01/1111"
+   End If
+
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_BORDEREAUX Then
+      If Trim(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text) = "" And pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AH
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = FOLDER_BORDEREAUX
+
+       If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or _
+         (UCase(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> UCase(DOC_BORDEREAUX_NOTIFICATION) And _
+          UCase(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> UCase(DOC_BORDEREAUX_PAYMENT)) Then
+
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_UNCLASSIFIED
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = PRIORITY_UNCLASSIFIED
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = "HK_BRDX_FNOL"
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = FOLDER_BORDEREAUX
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Text = FOLDER_BORDEREAUX
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Text = FOLDER_BORDEREAUX
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Text = "999999997"
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text = FOLDER_BORDEREAUX
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text = FOLDER_BORDEREAUX
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = "03/03/1113"
+   End If
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("DefaultFieldsValue() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function DefaultFieldsValueDocument(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   On Error GoTo ErrorHandler
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_RESEARCH Then
+      If Trim(pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) = "" Then
+         pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_UNCLASSIFIED
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = PRIORITY_UNCLASSIFIED
+      End If
+   End If
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_DEFAULT Then
+      If Trim(pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text) = "" Then
+         pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+      End If
+
+      If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = False Then
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_CLAIMS_NOTIFICATION_FNOL
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = "999"
+      End If
+   End If
+
+
+   If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_BORDEREAUX Then
+      pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = FOLDER_BORDEREAUX
+
+       If Trim(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) = "" Or _
+         (UCase(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> UCase(DOC_BORDEREAUX_NOTIFICATION) And _
+          UCase(pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text) <> UCase(DOC_BORDEREAUX_PAYMENT)) Then
+
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = DOC_UNCLASSIFIED
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = PRIORITY_UNCLASSIFIED
+      End If
+   End If
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("DefaultFieldsValueDocument() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Private Sub BlankFormatter_FormatField(ByVal FieldText As String, ByRef FormattedText As String, ByRef ErrDescription As String, ByRef ValidFormat As Boolean)
+
+    If Len(FieldText) = 0 Then
+      ValidFormat = False
+      ErrDescription = "Field must not be empty"
+   Else
+      ' remove special characters "-/." + space from string
+      FormattedText = Replace(FieldText, "-", "")
+      FormattedText = Replace(FormattedText, " ", "")
+      FormattedText = Replace(FormattedText, "/", "")
+   End If
+
+End Sub
+
+
+Private Sub Document_BeforeClassifyXDoc(pxDoc As CASCADELib.CscXDocument, bSkip As Boolean)
+
+   On Error GoTo ErrorHandler
+
+   Dim BarcodeText As String
+   Dim sSource As String
+
+   'WriteToLogFile("Document_BeforeClassifyXDoc")
+
+   BarcodeText = pxDoc.Fields.ItemByName(FIELD_BARCODE_SEPARATOR).Text
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   If BarcodeText = "66665555" Then
+
+      pxDoc.Reclassify (DOC_CLASS_COVERSHEET, 1)
+      WriteToLogFile("Document_BeforeClassifyXDoc - Coversheet")
+
+   ElseIf BarcodeText = "11111111" Then
+
+      pxDoc.Reclassify (DOC_CLASS_SEPARATOR, 1)
+      WriteToLogFile("Document_BeforeClassifyXDoc - Separator")
+
+   Else
+
+      'Default A&H for LAN & Email Sweep
+      If Len(sSource) > 0 Then
+         pxDoc.Reclassify (DOC_AH, 1)
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("Document_BeforeClassifyXDoc() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Public Function RemoveSymbols(ByVal sText As String) As String
+
+   Dim FormattedText As String
+
+   FormattedText = Replace(sText, "-", "")
+   FormattedText = Replace(FormattedText, " ", "")
+   FormattedText = Replace(FormattedText, "/", "")
+   FormattedText = Replace(FormattedText, ",", "")
+   FormattedText = Replace(FormattedText, ".", "")
+   FormattedText = Replace(FormattedText, "'", "")
+   FormattedText = Replace(FormattedText, """", "")
+   FormattedText = Replace(FormattedText, "^", "")
+   FormattedText = Replace(FormattedText, "&", "")
+   FormattedText = Replace(FormattedText, "*", "")
+   FormattedText = Replace(FormattedText, "(", "")
+   FormattedText = Replace(FormattedText, ")", "")
+   FormattedText = Replace(FormattedText, "_", "")
+   FormattedText = Replace(FormattedText, "=", "")
+   FormattedText = Replace(FormattedText, "+", "")
+   FormattedText = Replace(FormattedText, "%", "")
+   FormattedText = Replace(FormattedText, "$", "")
+   FormattedText = Replace(FormattedText, "#", "")
+   FormattedText = Replace(FormattedText, "@", "")
+   FormattedText = Replace(FormattedText, "!", "")
+   FormattedText = Replace(FormattedText, "~", "")
+   FormattedText = Replace(FormattedText, "`", "")
+   FormattedText = Replace(FormattedText, "?", "")
+   FormattedText = Replace(FormattedText, "<", "")
+   FormattedText = Replace(FormattedText, ">", "")
+   FormattedText = Replace(FormattedText, "\", "")
+   FormattedText = Replace(FormattedText, "|", "")
+   FormattedText = Replace(FormattedText, "{", "")
+   FormattedText = Replace(FormattedText, "}", "")
+   FormattedText = Replace(FormattedText, "[", "")
+   FormattedText = Replace(FormattedText, "]", "")
+
+   RemoveSymbols = FormattedText
+End Function
+
+Private Sub FormatterClaimNo_FormatField(ByVal FieldText As String, FormattedText As String, ErrDescription As String, ValidFormat As Boolean)
+
+   FormattedText = RemoveSymbols(FieldText)
+   ValidFormat = True
+
+End Sub
+
+Private Sub FormatterFeatureCode_FormatField(ByVal FieldText As String, FormattedText As String, ErrDescription As String, ValidFormat As Boolean)
+
+   FormattedText = RemoveSymbols(FieldText)
+   ValidFormat = True
+
+End Sub
+
+Private Sub FormatterCountryCode_FormatField(ByVal FieldText As String, FormattedText As String, ErrDescription As String, ValidFormat As Boolean)
+
+   FormattedText = RemoveSymbols(FieldText)
+   ValidFormat = True
+
+End Sub
+
+
+
+Private Sub ValidationBORDEREAUX_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+   Dim strClaimType As String
+   Dim strSubfolder As String
+
+   strClaimType = ValItems.Item("ClaimType").Text
+   strSubfolder = ValItems.Item("Subfolder").Text
+
+   Dim bRoute As Boolean
+   bRoute = ValidRoute(pxDoc)
+
+   If bRoute = True And strClaimType = FOLDER_BORDEREAUX Then
+      If strSubfolder <> SUBFOLDER_BORDEREAUX Then
+         ValidField = False
+         ErrDescription = "Please select BORDEREAUX subfolder for BORDEREAUX folder"
+      Else
+         ValidField = True
+      End If
+   End If
+
+End Sub
+
+
+Private Sub ValidationDocSubfolder_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strDocType As String
+   Dim strSubfolder As String
+   Dim sReturned As String
+   Dim sDBsubfolder As String
+
+   strDocType = Trim(UCase(ValItems.Item("DocType").Text))
+
+   strSubfolder = Trim(ValItems.Item("Subfolder").Text)
+
+   If Len(strDocType) > 0 Then
+
+      sDBsubfolder = SearchKTMDatabaseByCode(strDocType, DB_DOCTYPE, KTM_DB_DOCTYPE_COL_DOCTYPE, KTM_DB_DOCTYPE_COL_SUBFOLDER)
+
+      If Len(sDBsubfolder) > 0 Then
+
+         If UCase(sDBsubfolder) = UCase(strSubfolder) Then
+            ValidField = True
+         Else
+            ValidField = False
+            ErrDescription = "Document Type selected not under correct Subfolder"
+         End If
+
+      Else
+         ValidField = False
+         ErrDescription = "Document Type is Not Valid"
+      End If
+
+   Else
+      ValidField = False
+      ErrDescription = "Document Type cannot leave empty"
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationDocSubfolder_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidationClaimNumber_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   If doNotLookup Then
+      Exit Sub
+   End If
+   'Call formatter prior validation rule
+   Project.FieldFormatters.ItemByName("FormatterClaimNo").FormatField (pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER))
+
+   Dim strClaimNumber As String
+   strClaimNumber = Trim(ValItems.Item("ClaimNumber").Text)
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+   'strClaimType = Trim(ValItems.Item("ClaimType").Text)
+
+   If Len(strClaimNumber) > 0 Then
+
+      If Len(strClaimType) = 0 Then
+
+         'this is to prevent multiple triggering of this function,
+         'when multiple feature recrds returned and inserted to table rows
+         If strClaimNumber <> sPreviousClaim Or _
+            strClaimNumber <> pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text Or _
+            Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) = "" Then
+
+            sPreviousClaim = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+            sPreviousFeature = Trim(pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text)
+
+            ClearWebFields(pxDoc)
+
+            'Retrieve AEGIS value
+            ClaimLookup(pxDoc)
+            WriteToLogFile("ClaimLookup is called in Validation rules")
+
+            'Match retrieve AEGIS value with Ocred data
+            MatchAEGISOnDocument(pxDoc)
+
+           If Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) <> "" Then
+               If (strClaimNumber = pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) Or (strClaimNumber = pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text) Then
+
+
+                  ValidField = True
+
+                  pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).ExtractionConfident = True
+                  pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).ErrorDescription = ""
+                  pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Valid = True
+
+                  pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).ExtractionConfident = True
+                  pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).ErrorDescription = ""
+                  pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Valid = True
+
+                  pxDoc.Fields.ItemByName(FIELD_LOB_CODE).ExtractionConfident = True
+                  pxDoc.Fields.ItemByName(FIELD_LOB_CODE).ErrorDescription = ""
+                  pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = True
+
+               Else
+
+                  ValidField = False
+                  ErrDescription = "Claim Number not found in AEGIS"
+
+
+               End If
+            Else
+               ErrDescription = sWebServiceError
+               ValidField = False
+            End If
+
+         Else     'if the claim number search is the same as previous
+
+            If Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) = "" Then
+               ValidField = False
+               ErrDescription = "Claim Number not found"
+            Else
+
+               If strClaimNumber <> pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text Then
+                  ValidField = False
+                  ErrDescription = "Claim Number not found"
+
+               Else
+                  ValidField = True
+               End If
+
+            End If
+
+         End If
+
+      Else
+         ErrDescription = "Claim Number Is Not allow when Folder Is checked"
+         ValidField = False
+      End If
+
+   Else
+
+      ClearWebFields(pxDoc)
+
+      If Len(strClaimType) <= 0 Then
+         ValidField = False
+         ErrDescription = "Both Claim Number and Folder cannot leave empty"
+      Else
+         ValidField = True
+      End If
+
+   End If
+
+   sPreviousClaim = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationClaimNumber_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidationClaimType_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strClaimType As String
+   strClaimType = Trim(ValItems.Item("ClaimType").Text)
+
+   Dim strClaimNumber As String
+   'strClaimNumber = Trim(ValItems.Item("ClaimNumber").Text)
+   strClaimNumber = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+   Dim strFeatureCode As String
+   strFeatureCode = Trim(ValItems.Item("FeatureCode").Text)
+
+   If InStr(strClaimType, "|") > 0 Then
+      ValidField = False
+      ErrDescription = "Only 1 Folder is allowed"
+   Else
+
+      If Len(strClaimType) > 0 Then
+
+         If Len(strClaimNumber) > 0 And Len(strFeatureCode) > 0 Then
+
+            ValidField = False
+            ErrDescription = "Claim Number and Feature Code is not allow when Folder is checked"
+
+         ElseIf Len(strClaimNumber) > 0 Then
+
+            ValidField = False
+            ErrDescription = "Claim Number is not allow when Folder is checked"
+
+         ElseIf Len(strFeatureCode) > 0 Then
+
+            ValidField = False
+            ErrDescription = "Feature Code is not allow when Folder is checked"
+         Else
+
+            ClearWebFields(pxDoc)
+            ValidField = True
+
+         End If
+
+      Else     'Claim Type is empty
+
+         If Len(strClaimNumber) = 0 Then
+            ValidField = False
+            ErrDescription = "Both Claim Number and Folder cannot leave empty"
+         Else
+            ValidField = True
+         End If
+
+      End If
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationClaimType_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Sub ValidationLOB_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strLOB As String
+
+   Dim AegisLOB As String
+   AegisLOB = UCase(IsAegisMajorLine(pxDoc))
+
+   strLOB = UCase(Trim(ValItems.Item("LOB").Text))
+
+   If Len(strLOB) > 0 Then
+      If Len (AegisLOB) > 0 Then
+
+         If AegisLOB <> strLOB Then
+             ValidField = False
+             ErrDescription = "LOB selected not same as AEGIS LOB"
+         Else
+
+            ValidField = True
+         End If
+      End If
+   Else
+      ValidField = False
+      ErrDescription = "LOB cannot leave empty"
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationLOB_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidationWorklist_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strWorklist As String
+   Dim sReturned As String
+
+   strWorklist = UCase(Trim(ValItems.Item("Worklist").Text))
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   Dim sRouting As String
+   sRouting = getBatchField("Routing", pxDoc)
+
+
+   If Len(strWorklist) > 0 Then
+
+      sReturned = SearchKTMDatabaseByCode(strWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX, KTM_DB_WORKLIST_COL_TYPE)
+
+      If Len(sReturned) > 0 Then
+
+         If IsValidWorklist(pxDoc, strWorklist) = True Then
+            ValidField = True
+         Else
+            ValidField = False
+            ErrDescription = "Worklist invalid in use with Claim Number"
+         End If
+
+      Else
+         ValidField = False
+         ErrDescription = "Worklist is Not Valid"
+      End If
+
+   Else
+      ValidField = False
+      ErrDescription = "Worklist cannot be empty"
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationWorklist_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidationCountryCode_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strCountryCode As String
+   strCountryCode = ValItems.Item("CountryCode").Text
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+
+   Dim bRoute As Boolean
+   If bRoute = False Then
+      bRoute = ValidRoute(pxDoc)
+   End If
+
+   If Len(strCountryCode) > 0 Then
+
+      If Len(strClaimType) > 0 Then
+         ValidField = False
+         ErrDescription = "Country Code is not allow when Folder is checked"
+
+      Else
+         If Len(strCountryCode) > 2 Then
+
+            ValidField = False
+            ErrDescription = "Maximum 2 character can be entered"
+
+         Else
+            If IsAlphaOnly(strCountryCode) = False Then
+               ValidField = False
+               ErrDescription = "Country Code only allow alphabet"
+            Else
+               ValidField = True
+            End If
+         End If
+
+      End If
+   Else
+
+      If bRoute = False Then
+         ValidField = False
+         ErrDescription = "Country Code cannot left empty"
+      Else
+          ValidField = True
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationCountryCode_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Sub ValidationFeatureCode_Validate(ByVal ValItems As CASCADELib.CscXDocValidationItems, ByVal pxDoc As CASCADELib.CscXDocument, ByRef ErrDescription As String, ByRef ValidField As Boolean)
+
+On Error GoTo ErrorHandler
+
+   Dim strFeatureCode As String
+   strFeatureCode = Trim(ValItems.Item("FeatureCode").Text)
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+
+   Dim strClaimNumber As String
+   strClaimNumber = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+   Dim bRoute As Boolean
+   If bRoute = False Then
+      bRoute = ValidRoute(pxDoc)
+
+   End If
+
+   If Len(strClaimNumber) = 0 And bRoute = False Then
+
+      ValidField = False
+      ErrDescription = "Please ensure Claim Number is fill up"
+
+   Else
+
+      If Len(strFeatureCode) > 0 Then
+
+         If Len(strClaimType) > 0 Then
+
+            ValidField = False
+            ErrDescription = "Feature Code is not allow when Folder is checked"
+
+         Else
+            If Len(strFeatureCode) > 3 Then
+
+               ValidField = False
+               ErrDescription = "Maximum 3 character can be entered"
+
+            Else
+               'If IsAlphaOnly(strFeatureCode) = False Then
+                  'ValidField = False
+                  'ErrDescription = "Feature Code only allow alphabet"
+               'Else
+
+                  If bRoute = False And Trim(pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text) = "" Then
+                     ValidField = False
+                     ErrDescription = "Please ensure at least 1 feature record is selected"
+                  Else
+                     ValidField = True
+                  End If
+
+               'End If
+            End If
+
+         End If
+      Else
+         If bRoute = False And Trim(pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text) = "" Then
+            ValidField = False
+            ErrDescription = "Please ensure at least 1 feature record is selected"
+         Else
+
+            If bRoute = False Then
+               If Len(pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text) > 0 Then
+                  pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text = pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text
+               End If
+            End If
+
+            ValidField = True
+         End If
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ValidationFeatureCode_Validate() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Function IsValidWorklist(ByVal pxDoc As CASCADELib.CscXDocument, ByVal sWorkList As String) As Boolean
+
+   Dim sList(60) As String
+   Dim nList As Integer
+
+   Dim bValid As Boolean
+   bValid = False
+
+   Dim nFound As Integer
+
+   GetAllWorklist(pxDoc, sList, nList)
+
+   Dim i As Integer
+
+   For i = 0 To UBound(sList)
+      If Trim(sList(i)) <> "" Then
+
+         If Trim(UCase(sWorkList)) = Trim(UCase(sList(i))) Then
+            nFound = nFound + 1
+         End If
+      End If
+   Next i
+
+   If nFound = 2 Then
+      bValid =True
+   Else
+      bValid = False
+   End If
+
+   IsValidWorklist = bValid
+End Function
+
+Public Sub GetAllWorklist(ByVal pxDoc As CASCADELib.CscXDocument, ByRef sList() As String, ByRef nList As Integer)
+
+   Dim qText(1) As String
+
+   Dim qField(1) As Long
+
+   qText(0) = "TRUE"
+
+   If Len(Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)) > 0 Then
+      qField(0) = KTM_DB_WORKLIST_COL_CLAIM + 1
+      GetWorkList(qText, qField, sList, nList, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX)
+   End If
+
+   If Len(Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)) > 0 Then
+
+      If pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_BORDEREAUX Then
+         qField(0) = KTM_DB_WORKLIST_COL_BORDEREAUX + 1
+      ElseIf pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_DEFAULT Then
+         qField(0) = KTM_DB_WORKLIST_COL_DEFAULT + 1
+      ElseIf pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = FOLDER_RESEARCH Then
+         qField(0) = KTM_DB_WORKLIST_COL_RESEARCH + 1
+      End If
+      GetWorkList(qText, qField, sList, nList, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX)
+   End If
+
+
+   If pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AH Then
+      qField(0) = KTM_DB_WORKLIST_COL_AH + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AUTO Then
+      qField(0) = KTM_DB_WORKLIST_COL_AUTO + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_ENERGY Then
+      qField(0) = KTM_DB_WORKLIST_COL_ENERGY + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_PROPERTY Then
+      qField(0) = KTM_DB_WORKLIST_COL_PROPERTY + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_FINANCIAL_LINES Then
+      qField(0) = KTM_DB_WORKLIST_COL_FINANCIAL_LINES + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_MARINE Then
+      qField(0) = KTM_DB_WORKLIST_COL_MARINE + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_CASUALTY Then
+      qField(0) = KTM_DB_WORKLIST_COL_CASUALTY + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_EXTENDED_WARRANTY Then
+      qField(0) = KTM_DB_WORKLIST_COL_EW + 1
+   ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_PERSONAL_LINES Then
+      qField(0) = KTM_DB_WORKLIST_COL_PLNA + 1
+    ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_AVIATION Then
+      qField(0) = KTM_DB_WORKLIST_COL_AVIATION + 1
+    ElseIf pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = DOC_TRADE_CREDIT Then
+      qField(0) = KTM_DB_WORKLIST_COL_TRADE_CREDIT + 1
+   End If
+
+   GetWorkList(qText, qField, sList, nList, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX)
+
+End Sub
+
+Public Sub GetWorkList (qText() As String, qField() As Long, ByRef sList() As String, ByRef nList As Integer, strDBLov As String, iColIndex As Integer)
+
+
+On Error GoTo ErrorHandler
+   Dim strPrevItem As String
+
+   If Len(qText(0)) > 0 Then
+
+      Dim oDBLOV As CscDatabase
+      Dim oDBItems As CscDatabaseResItems
+      Dim oRecords() As String
+
+      Dim sDisplay As String
+
+      Set oDBLOV = Project.Databases.ItemByName(strDBLov)
+      Set oDBItems = oDBLOV.Search(qText, qField, CscEvalMatchQuery, 30)
+
+      Dim i As Integer
+
+      If oDBItems.Count > 0 Then
+
+         For i = 0 To oDBItems.Count - 1
+            If oDBItems.Item(i).Score > 0.9 Then
+               oRecords = oDBLOV.GetRecordData(oDBItems.Item(i).RecID)
+
+               If UCase(Trim(oRecords(iColIndex))) <> UCase(Trim(strPrevItem)) Then
+
+                  sDisplay = UCase(oRecords(iColIndex))
+                  sList(i + nList) = sDisplay
+
+               End If
+
+               strPrevItem = oRecords(iColIndex)
+            End If
+         Next i
+
+         nList = nList + oDBItems.Count
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("GetWorkList() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Function IsValidFoler(ByVal sSearch As String) As Boolean
+
+   If UCase(sSearch) = FOLDER_RESEARCH Or UCase(sSearch) = FOLDER_DEFAULT Or UCase(sSearch)= FOLDER_BORDEREAUX Then
+      IsValidFoler = True
+   Else
+      IsValidFoler = False
+   End If
+
+End Function
+
+
+Private Function ValidRoute(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+
+   Dim strClaimNumber As String
+   strClaimNumber = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+   Dim strFeatureCode As String
+   strFeatureCode = Trim(pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text)
+
+   Dim bValid As Boolean
+   bValid = False
+
+   If Len(strClaimType) > 0 Then
+      If IsValidFoler(strClaimType) = True Then
+
+         If Len(strClaimNumber) = 0 Then
+            bValid = True
+         Else
+            bValid = False
+         End If
+
+         'if AZL from cover sheet find no claim number
+         If bCSClaimFound = False Then
+            bValid = True
+         End If
+      End If
+   End If
+
+   ValidRoute = bValid
+End Function
+
+Private Function ValidEmailRoute(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   Dim sRouting As String
+   sRouting = getBatchField("Routing", pxDoc)
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+
+   Dim strClaimNumber As String
+   strClaimNumber = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+   Dim strAegisClaim As String
+   strAegisClaim = Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text)
+
+   Dim strFeatureCode As String
+   strFeatureCode = Trim(pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text)
+
+
+   Dim strAegisFeature As String
+   strAegisFeature = Trim(pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text)
+
+   Dim bValid As Boolean
+   bValid = False
+
+   If UCase(sSource) = "EMAIL" Then
+      'Worklist Email
+      If UCase(sRouting) = "" Or UCase(sRouting) ="NA" Then
+
+         If Len(strClaimType) = 0 Then
+            If UCase(strClaimNumber) = UCase(strAegisClaim) And Len(strAegisFeature) > 0 Then
+
+               bValid = True
+            Else
+               bValid = False
+            End If
+         Else
+            bValid = False
+         End If
+      Else
+         bValid = False
+      End If
+   Else
+      bValid = False
+   End If
+
+   ValidEmailRoute = bValid
+End Function
+
+Private Function ValidClaimRoute(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   Dim strClaimType As String
+   strClaimType = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text)
+
+   Dim strClaimNumber As String
+   strClaimNumber = Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text)
+
+   Dim strFeatureCode As String
+   strFeatureCode = Trim(pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text)
+
+   Dim bValid As Boolean
+   bValid = False
+
+   If Len(strClaimType) = 0 Then
+      bValid = True
+   Else
+      bValid = False
+   End If
+
+   ValidClaimRoute = bValid
+End Function
+
+Private Function IsAlphaOnly(ByVal sField As String) As Boolean
+
+   Dim bAlpha As Boolean
+   Dim iLen As Integer, i As Integer
+
+
+   iLen = Len(sField)
+
+   For i = 1 To iLen
+
+      If (Asc(Mid$(sField, i, 1)) >= 65 And Asc(Mid$(sField, i, 1)) <= 90) Or _
+         Asc(Mid$(sField, i, 1)) >= 97 And  Asc(Mid$(sField, i, 1)) <= 122 Then
+
+         bAlpha = True
+
+      Else
+         bAlpha = False
+      End If
+
+   Next i
+
+   IsAlphaOnly = bAlpha
+End Function
+
+
+Public Function SearchDocTypeByType(qText() As String) As String
+
+On Error GoTo ErrorHandler
+
+   Dim qField(1) As Long
+   qField(0) = 0
+
+   Dim oDBLOV As CscDatabase
+   Dim oDBItems As CscDatabaseResItems
+   Dim oRecords() As String
+
+
+   Set oDBLOV = Project.Databases.ItemByName(DB_DOCTYPE)
+   Set oDBItems = oDBLOV.Search(qText, qField, CscEvalMatchQuery, 5)
+
+   Dim i As Integer
+
+   If oDBItems.Count > 0 Then
+      For i = 0 To oDBItems.Count - 1
+
+         If oDBItems.Item(i).Score > .9 Then
+            oRecords = oDBLOV.GetRecordData(oDBItems.Item(i).RecID)
+            SearchDocTypeByType = oRecords(KTM_DB_DOCTYPE_COL_SUBFOLDER) & "|" & oRecords(KTM_DB_DOCTYPE_COL_PRIORITYCODE)
+            Exit For
+         End If
+
+      Next i
+   End If
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("SearchDocTypeByType() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Public Function ReadAZLValues(ByVal sResult As String) As String
+
+On Error GoTo ErrorHandler
+
+   Dim iCkBox As Integer
+
+   Dim strCode1 As String
+   Dim strCode2 As String
+   Dim strCombinedCode As String
+
+   If Len(sResult) > 0 Then
+
+      Dim arrResult() As String
+      arrResult = Split(sResult, "|")
+
+      For iCkBox = 0 To 19
+         If (iCkBox+1) Mod 2 = 0 Then 'To get the second column of check boxes
+
+            If arrResult(iCkBox) = "1" Then
+               strCode2 = CStr(Round((iCkBox+1)/2) - 1)
+            End If
+
+         Else
+            If arrResult(iCkBox) = "1" Then
+               strCode1 = CStr(Fix((iCkBox+1)/2))
+            End If
+         End If
+      Next
+
+      ReadAZLValues = strCode1 & strCode2
+
+   End If
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("ReadAZLValues() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Public Function SearchKTMDatabaseByCode (strSearch As String, sKtmDB As String, lSearchCol As Long, lResultCol As Long) As String
+
+On Error GoTo ErrorHandler
+
+   Dim qText(1) As String
+   qText(0) = Trim(strSearch)
+
+   Dim qField(1) As Long
+   qField(0) = lSearchCol + 1
+
+   Dim oDBLOV As CscDatabase
+   Dim oDBItems As CscDatabaseResItems
+   Dim oRecords() As String
+
+   Set oDBLOV = Project.Databases.ItemByName(sKtmDB)
+   Set oDBItems = oDBLOV.Search(qText, qField, CscEvalMatchQuery, 5)
+
+   Dim i As Integer
+
+   If oDBItems.Count > 0 Then
+      For i = 0 To oDBItems.Count - 1
+
+         If oDBItems.Item(i).Score > .9 Then
+            oRecords = oDBLOV.GetRecordData(oDBItems.Item(i).RecID)
+
+            SearchKTMDatabaseByCode = oRecords(lResultCol)
+            Exit For
+         End If
+
+      Next i
+   End If
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("SearchKTMDatabaseByCode() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+'Populate Subfolder & Priority fields -----
+Public Sub PopulateDocTypeFields(ByVal pxDoc As CASCADELib.CscXDocument, sDocType As String )
+   Dim qText(1) As String
+   Dim strReturned As String
+
+   qText(0) = sDocType
+   strReturned = SearchDocTypeByType(qText)
+
+   If Len(strReturned) > 0 Then
+      pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = UCase(Split(strReturned, "|")(0))
+      pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = Split(strReturned, "|")(1)
+   End If
+
+End Sub
+
+Public Sub CreateFolders(ByVal pXRootFolder As CASCADELib.CscXFolder)
+
+On Error GoTo ErrorHandler
+
+   Dim oFolder As CscXFolder
+   Dim oDocInfo As CscXDocInfo
+   Dim oField As CscXDocField
+   Dim n As Integer
+   Dim x As Integer
+   Dim nFolderIndex As Integer
+
+   ' only create folders if they do not already exist
+
+   If pXRootFolder.Folders.Count = 0 Then
+      ' create folders
+      For n = 0 To pXRootFolder.DocInfos.Count - 1
+
+         ' document
+         Set oDocInfo = pXRootFolder.DocInfos.ItemByIndex(n)
+
+         ' document class
+
+         Select Case oDocInfo.ExtractionClass
+         Case DOC_CLASS_COVERSHEET
+            ' create folder
+            nFolderIndex = Batch.CreateFolder(pXRootFolder)
+            Set oFolder = pXRootFolder.Folders.ItemByIndex(nFolderIndex)
+            oFolder.DisplayName = FOLDER_CLAIM_TRANSACTION
+
+         End Select
+      Next
+
+      ' last folder index
+      nFolderIndex = pXRootFolder.Folders.Count - 1
+
+      For n = pXRootFolder.DocInfos.Count - 1 To 0 Step -1
+         ' document
+         Set oDocInfo = pXRootFolder.DocInfos.ItemByIndex(n)
+
+         ' document class
+         Select Case oDocInfo.ExtractionClass
+         Case DOC_CLASS_COVERSHEET
+            ' folder
+
+            Set oFolder = pXRootFolder.Folders.ItemByIndex(nFolderIndex)
+
+            ' decrement folder index
+
+
+            nFolderIndex = nFolderIndex - 1
+
+            ' move documents into packet folder
+            For x = pXRootFolder.DocInfos.Count - 1 To n Step - 1
+               ' document
+               Set oDocInfo = pXRootFolder.DocInfos.ItemByIndex(x)
+
+
+
+               ' move document into folder
+               oFolder.MoveDocumentIntoFolder(oDocInfo, 0)
+
+               ' set folder fields
+               Select Case oDocInfo.ExtractionClass
+               Case DOC_CLASS_COVERSHEET
+
+                  UpdateFolderFields (oDocInfo.XDocument)
+               End Select
+            Next
+
+         End Select
+      Next
+
+   End If
+
+   Exit Sub
+ErrorHandler:
+   WriteToLogFile("CreateFolders() Error: " & Err.Number & " - " & Err.Description)
+
+End Sub
+
+Public Sub UpdateFolderFields(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim oField As CscXDocField
+   Dim n As Integer
+
+   For n = 0 To pxDoc.Fields.Count - 1
+      Set oField = pxDoc.Fields.ItemByIndex(n)
+      Call UpdateFolderField(pxDoc, oField)
+   Next
+
+End Sub
+
+
+
+Public Sub UpdateFolderField(ByVal pxDoc As CASCADELib.CscXDocument, ByVal pField As CASCADELib.CscXDocField)
+
+   If Not pxDoc.ParentFolder Is Nothing Then
+      If pxDoc.ParentFolder.DisplayName = FOLDER_CLAIM_TRANSACTION Then
+         ' update folder field
+         If pxDoc.ParentFolder.Fields.Exists(pField.Name) Then
+            ' set folder cheque number
+            With pxDoc.ParentFolder.Fields.ItemByName(pField.Name)
+               .Text = pField.Text
+               .Confidence = 1
+               .ExtractionConfident = True
+               .Valid = True
+
+               .Left = pField.Left
+               .Top = pField.Top
+               .Width = pField.Width
+               .Height = pField.Height
+            End With
+         End If
+
+      End If
+   End If
+
+End Sub
+
+Public Function CreateBatchName(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+On Error GoTo ErrorHandler
+
+   Dim sCountryCode As String
+   sCountryCode = UCase(getBatchField("CountryCode", pxDoc))
+
+   Dim sLocalDate As String
+   sLocalDate = Format(getBatchField("ScanDate", pxDoc), "MMDDYY")
+
+   Dim sLocalTime As String
+   sLocalTime = Format(getBatchField("ScanTime", pxDoc), "hhnn")
+
+   Dim sDate As String
+   sDate = Format(getStandardBatchField("BATCH_CREATIONDATETIME", pxDoc), "MMDDYY")
+
+   Dim sTime As String
+   sTime = Format(getStandardBatchField("BATCH_CREATIONDATETIME", pxDoc), "hhnn")
+
+   Dim sSource As String
+   sSource = UCase(getBatchField("KICService", pxDoc))
+
+   Dim sBatchId As String
+   sBatchId = getStandardBatchField("EXTERNAL_BATCHID", pxDoc)
+   If Len(sBatchId) < 7 Then
+      sBatchId = Format(sBatchId, "0000000")
+   ElseIf Len(sBatchId) > 7 Then
+      sBatchId = Right(sBatchId, 7)
+   End If
+
+   Dim sLOB As String
+   sLOB = pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text
+   sLOB = SearchKTMDatabaseByCode(sLOB, DB_LOB, KTM_DB_LOB_COL_CHECKBOX, KTM_DB_LOB_COL_ABR)
+
+   Dim sWorklist As String
+   sWorklist = UCase(getBatchField("Worklist", pxDoc))
+
+   Dim sStation As String
+
+   If sSource = "FOLDER" Then
+      sStation ="L1"
+   ElseIf sSource = "EMAIL" Then
+      sStation ="E1"
+   Else
+      sStation = UCase(getBatchField("ScanStationID", pxDoc))
+      sWorklist = "CS"
+   End If
+
+   If UCase(Project.ScriptVariables.ItemByName(SCRIPT_VAR_TEST_MODE).Value) = UCase("True") Then
+      'Session ID after colon symbol
+      sStation = Replace(sStation, ":", "")
+   End If
+
+   Dim sBatchName As String
+   'To get remote site scan date time from KC value not KTM value
+   'For Email/LAN sweep use KTM value for HK data format
+   If Trim(sLocalDate) <> "" And Trim(sLocalTime) <> "" Then
+      If Trim(sSource) = "" Then
+
+         'if scan from local machine
+         'use KTM date format for Day + KC time value
+         sBatchName = sCountryCode & sLOB & " " & sStation & " " & sWorklist & " " & sDate & " " & sLocalTime & " " & sBatchId
+      Else
+         sBatchName = sCountryCode & sLOB & " " & sStation & " " & sWorklist & " " & sDate & " " & sTime & " " & sBatchId
+      End If
+   Else
+      sBatchName = sCountryCode & sLOB & " " & sStation & " " & sWorklist & " " & sDate & " " & sTime & " " & sBatchId
+   End If
+
+   CreateBatchName = sBatchName
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("CreateBatchName() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Public Function GetPriorityClaimNo(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim sSource As String
+   sSource = UCase(getBatchField("KICService", pxDoc))
+
+   If sSource = "FOLDER" Then
+
+      Dim sFileDirectory As String
+      sFileDirectory = getBatchField("SourceFileName", pxDoc)
+
+      Dim sFileName As String
+      sFileName = Mid(sFileDirectory, InStrRev(sFileDirectory, "\") + 1)
+      sFileName = Left(sFileName, Len(sFileName) - 4)   'to cut off the file extention
+
+      GetPriorityClaimNo = sFileName
+
+   ElseIf sSource = "EMAIL" Then
+
+      Dim sEmailSubject As String
+      sEmailSubject = Trim(getBatchField("EmailSubject", pxDoc))
+
+      GetPriorityClaimNo = sEmailSubject
+   End If
+
+End Function
+
+Public Function ReclassifyByLob(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim sWebLOB As String
+   sWebLOB = UCase(Trim(pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Text))
+
+   Dim sLOBCode As String
+   Dim sLOBName As String
+   Dim sCMLob As String
+
+   If Len(sWebLOB) > 0 Then
+      sLOBName = SearchKTMDatabaseByCode(sWebLOB, DB_LOB, KTM_DB_LOB_COL_ACORD, KTM_DB_LOB_COL_CHECKBOX)
+      'CM Item Type doesnt have COMBINED Lob
+      sCMLob = UCase(SearchKTMDatabaseByCode(sWebLOB, DB_LOB, KTM_DB_LOB_COL_ACORD, KTM_DB_LOB_COL_TYPE))
+
+      pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = UCase(sCMLob)
+      pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = True
+
+      If Len(sLOBName) > 0 Then
+         pxDoc.Reclassify(sCMLob, 1)
+
+         ReclassifyByLob = sCMLob
+      End If
+   End If
+
+End Function
+
+Private Function IsAegisMajorLine(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim sWebLOB As String
+   sWebLOB = UCase(Trim(pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Text))
+
+   Dim sLOBName As String
+   Dim sLOBCode As String
+   Dim sCMLob As String
+
+
+   If Len(sWebLOB) > 0 Then
+
+      sLOBName = SearchKTMDatabaseByCode(sWebLOB, DB_LOB, KTM_DB_LOB_COL_ACORD, KTM_DB_LOB_COL_CHECKBOX)
+      'CM Item Type doesnt have COMBINED Lob
+      sCMLob = UCase(SearchKTMDatabaseByCode(sWebLOB, DB_LOB, KTM_DB_LOB_COL_ACORD, KTM_DB_LOB_COL_TYPE))
+
+      pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text = UCase(sLOBName)
+      pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_LOB_CODE).ErrorDescription = ""
+
+      'pxDoc.Fields.ItemByName(FIELD_COUNTRY_CODE).Valid = True
+      'pxDoc.Fields.ItemByName(FIELD_COUNTRY_CODE).ErrorDescription = ""
+
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).ErrorDescription = ""
+
+      IsAegisMajorLine = sCMLob
+   Else
+      IsAegisMajorLine = ""
+   End If
+
+End Function
+
+
+Private Sub Document_Validated(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   On Error GoTo ErrorHandler
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   Dim sClaimType As String
+   Dim bValidFolder As Boolean
+
+   If Project.ScriptExecutionMode = CscScriptModeValidation And bValFinalBatchClosed = False Then
+
+      If pxDoc.IndexInFolder = 0 Then
+
+         pxDoc.Fields.ItemByName(FIELD_BATCH_NAME).Text = CreateBatchName(pxDoc)
+
+         FormatCMFieldValue(pxDoc)
+         TruncateFields(pxDoc)
+
+         sClaimType = pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text
+         bValidFolder = IsValidFoler(sClaimType)
+
+         If bValidFolder = True And pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Valid = True Then
+            ClearWebFields(pxDoc)
+         Else
+            'Ensure that at least 1 feature record is selected
+            If Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) = "" Then
+               pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Valid = False
+               pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).ErrorDescription = "Aegis Feature Code cannot be empty, please ensure at least 1 Feature Record is selected"
+            End If
+         End If
+
+         pxDoc.Save()
+         bFirstDocValidated = True
+
+         'WriteToLogFile("Document_Validated, 1st Doc")
+
+         Dim nDoc As Integer
+         Dim nTotal As Integer
+         nTotal = pxDoc.ParentFolder.DocInfos.Count
+
+         Dim NextDoc As CscXDocument
+
+         For nDoc = 1 To nTotal - 1
+
+            If pxDoc.ParentFolder.DocInfos(nDoc).ExtractionClass <> DOC_CLASS_COVERSHEET And _
+               pxDoc.ParentFolder.DocInfos(nDoc).ExtractionClass <> DOC_CLASS_SEPARATOR Then
+               'Copy 1st document values to the rest of documents
+               Set NextDoc = pxDoc.ParentFolder.DocInfos(nDoc).XDocument
+               CopyFieldsToDocuments(pxDoc, NextDoc)
+
+               Project.ClassByName(NextDoc.ExtractionClass).ValidateAll(NextDoc)
+
+               'double assign values again
+               NextDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text
+               NextDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text
+
+               'WriteToLogFile("Document_Validated, Copy Doc values - " & nDoc)
+            End If
+
+         Next nDoc
+
+      End If
+
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("Document_Validated() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Public Sub GetScanID(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   If Len(sSource) = 0 Then
+      pxDoc.Fields.ItemByName(FIELD_CM_SCAN_ID).Text = getBatchField("ScanStationID", pxDoc)
+   Else
+      pxDoc.Fields.ItemByName(FIELD_CM_SCAN_ID).Text = ""
+   End If
+
+End Sub
+
+Public Sub FormatCMFieldValue(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sLOBCode As String
+
+   sLOBCode = SearchKTMDatabaseByCode(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text, DB_LOB, KTM_DB_LOB_COL_CHECKBOX, KTM_DB_LOB_COL_CODE)
+
+   pxDoc.Fields.ItemByName(FIELD_CM_LOB).Text = sLOBCode
+
+   pxDoc.Fields.ItemByName(FIELD_CM_DOCUMENT_TYPE).Text = pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text
+
+   pxDoc.Fields.ItemByName(FIELD_CM_WORKLIST).Text = pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text
+
+End Sub
+
+
+Public Sub FormatCMFieldDateValue(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   'WriteToLogFile("b4 FormatCMFieldDateValue is called - date rcvd - " & pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text)
+   'WriteToLogFile("b4 FormatCMFieldDateValue is called - date loss - " & pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text)
+   'WriteToLogFile("b4 FormatCMFieldDateValue is called - date report - " & pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text)
+
+   'Format Dates, to convert dates to internal format (server system date format) prior release to CM as MM/DD/YYYY
+   'This is assuming Web Service returning dates in MM/DD/YYYY
+   'For Date Received, assuming Document After Extract function has converted to MM/DD/YYYY
+   pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text = FormatHKDate(pxDoc.Fields.ItemByName(FIELD_CM_DATERCVD).Text)
+   pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text = Format(pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text, sInternalDateFormat)
+
+   If Trim(pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text) = "" Then
+    'do nothing, remain defaulted date value
+    Else
+      ' pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = FormatHKDate(pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text)
+      '  pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = Format(pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text, sInternalDateFormat)
+      pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text = pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text
+         pxDoc.Save()
+   End If
+
+   If Trim(pxDoc.Fields.ItemByName(FIELD_CM_DATEREPORT).Text) = "" Then
+        'do nothing, remain defaulted date value
+    Else
+        pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text = FormatHKDate(pxDoc.Fields.ItemByName(FIELD_CM_DATEREPORT).Text)
+        pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text = Format(pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text, sInternalDateFormat)
+   End If
+
+   'Format Dates
+
+   'pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text  = Format(getBatchField("ScanDate", pxDoc), sHKDateFormat)
+   'WriteToLogFile("received date 1 : " & pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text)
+
+   'pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text = Format(getStandardBatchField("BATCH_CREATIONDATETIME", pxDoc), sHKDateFormat)
+   'WriteToLogFile("received date 2 : " & pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text)
+
+   'WriteToLogFile("After FormatCMFieldDateValue is called - date rcvd - " & pxDoc.Fields.ItemByName(FIELD_DATE_RCVD).Text)
+   'WriteToLogFile("After FormatCMFieldDateValue is called - date loss - " & pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text)
+   'WriteToLogFile("After FormatCMFieldDateValue is called - date report - " & pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text)
+
+End Sub
+
+'this is assume web service returns MM/DD/YYYY
+Public Function FormatHKDate(ByVal sDate As String) As String
+
+    Dim sDay As String
+    Dim sMonth As String
+    Dim sYear As String
+
+    Dim lMonth As Integer
+    Dim sMonAbbr As String
+
+    Dim sReturn As String
+
+    If Len(sDate) = 10 Then
+
+        'MM on the 1st position
+        sMonth = Left(sDate, 2)
+
+        If IsNumeric(sMonth) Then
+
+            lMonth = CInt(sMonth)
+
+            If lMonth >= 1 And lMonth <= 12 Then
+                sMonAbbr = MonthName(lMonth)
+
+                sDay = Mid(sDate, 4, 2)
+                sYear = Right(sDate, 4)
+            Else
+                'DD on the 1st position
+                sDay = Left(sDate, 2)
+                sMonth = Mid(sDate, 4, 2)
+                sYear = Right(sDate, 4)
+
+                lMonth = CInt(sMonth)
+                If lMonth >= 1 And lMonth <= 12 Then
+                    sMonAbbr = MonthName(lMonth)
+                End If
+
+            End If
+        End If
+    End If
+
+    If Len(sDay) > 0 And Len(sMonAbbr) > 0 And Len(sYear) > 0 Then
+        FormatHKDate = sDay & "/" & sMonAbbr & "/" & sYear
+    Else
+        FormatHKDate = sDate
+    End If
+
+End Function
+
+Public Sub CopyFieldsToDocuments(ByVal pxDoc As CASCADELib.CscXDocument, ByVal NextDoc As CASCADELib.CscXDocument)
+
+   Dim oField As CscXDocField
+   Dim n As Integer
+
+   For n = 0 To NextDoc.Fields.Count - 1
+
+      If NextDoc.Fields.ItemByIndex(n).Name <> FIELD_DOCUMENT_TYPE And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_SUBFOLDER And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_PRIORITY And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_CLASSIFY And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_CM_DOCUMENT_TYPE And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_LI_AEGIS And _
+         NextDoc.Fields.ItemByIndex(n).Name <> FIELD_ORIGINAL_IMAGE Then
+
+         Set oField = pxDoc.Fields.ItemByName(NextDoc.Fields.ItemByIndex(n).Name)
+         Call CopyFieldToDocument(NextDoc, oField)
+      End If
+
+   Next n
+
+End Sub
+
+Public Sub CopyFieldToDocument(ByVal NextDoc As CASCADELib.CscXDocument, ByVal pField As CASCADELib.CscXDocField)
+
+   With NextDoc.Fields.ItemByName(pField.Name)
+      .Text = pField.Text
+      .ErrorDescription = ""
+      .Confidence = 1
+      .ExtractionConfident = True
+      .Valid = True
+   End With
+
+End Sub
+
+
+Private Function GetWebURL (ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim sEnv As String
+   sEnv = UCase(Project.ScriptVariables.ItemByName(SCRIPT_VAR_ENV).Value)
+
+   Dim sDevURL As String
+   sDevURL = Project.ScriptVariables.ItemByName(SCRIPT_VAR_DEV_URL).Value
+
+   Dim sQcURL As String
+
+   sQcURL = Project.ScriptVariables.ItemByName(SCRIPT_VAR_QC_URL).Value
+
+   Dim sModelURL As String
+   sModelURL = Project.ScriptVariables.ItemByName(SCRIPT_VAR_MODEL_URL).Value
+
+   Dim sProdURL As String
+   sProdURL = Project.ScriptVariables.ItemByName(SCRIPT_VAR_PROD_URL).Value
+
+
+   If sEnv = "QC" Then
+      GetWebURL = sQcURL
+   ElseIf sEnv = "DEV" Then
+      GetWebURL = sDevURL
+   ElseIf sEnv = "MODEL" Then
+      GetWebURL = sModelURL
+   ElseIf sEnv = "PROD" Then
+      GetWebURL = sProdURL
+   End If
+
+End Function
+
+
+Public Function RetrieveSSL(ByVal pxDoc As CASCADELib.CscXDocument) As APACKOFAX.ReturnedClaim
+
+   On Error GoTo ErrorHandler
+
+   Dim ws As APACKOFAX.ClientClass
+   Set ws = New APACKOFAX.ClientClass
+
+   Set RetrieveSSL = ws.GetClaim(GetWebURL(pxDoc), _
+   Project.ScriptVariables.ItemByName(SCRIPT_VAR_CERTIFICATE_PATH).Value, _
+   COUNTRY_VALUE, _
+   pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text, _
+   pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text)
+
+   Set ws = Nothing
+
+   Exit Function
+
+ErrorHandler:
+   sWebServiceError = Err.Description
+
+   WriteToLogFile("RetrieveSSL() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Public Sub ClaimLookup(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim oTable As CscXDocTable
+   Dim oRow As CscXDocTableRow
+   Dim sValue As String
+   Dim sFund As String
+   Dim sConcession As String
+   Dim asValues() As String
+   Dim asFunds() As String
+   Dim asConcessions() As String
+   Dim n As Integer
+
+   Dim oWSResponse As APACKOFAX.ReturnedClaim
+
+   Dim fd As APACKOFAX.ClientClass
+   Set fd = New APACKOFAX.ClientClass
+
+   Dim strMainNode As String
+
+   On Error GoTo ErrorHandler
+
+   Set oWSResponse = RetrieveSSL(pxDoc)
+
+   If Trim (oWSResponse.errorMessageText) = "" Then
+
+      Dim nFeatureCount As Integer
+      nFeatureCount = fd.FeatureRowCount(oWSResponse)
+
+      pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text = oWSResponse.ClaimNumber
+      pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text = oWSResponse.AEGISClaimNo
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Valid = True
+
+      If nFeatureCount = 1 Then
+         pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "FeatureCode")
+         pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Valid = True
+
+         pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "FeatureCode")
+         pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Valid = True
+         MakeFeatureCodeValid(pxDoc)
+
+         pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "ClaimantLastName")
+         pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Valid = True
+
+         pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "ClaimantFirstName")
+         pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Valid = True
+
+         pxDoc.Fields.ItemByName(FIELD_MINOR_LINE).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "MinorLineofBusiness")
+         pxDoc.Fields.ItemByName(FIELD_MINOR_LINE).Valid = True
+
+         pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "DateOfReport")
+         pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Valid = True
+          'For HK only
+         pxDoc.Fields.ItemByName(FIELD_CM_DATEREPORT).Text = pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text
+
+         pxDoc.Fields.ItemByName(FIELD_COVERAGE).Text = fd.RetrieveFeatureData(oWSResponse, 0, 0, "Coverage")
+         pxDoc.Fields.ItemByName(FIELD_COVERAGE).Valid = True
+
+         MakeSpecialFolderValid(pxDoc)
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Text = oWSResponse.PolicyNo
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Text = oWSResponse.InsuredName1
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Text = oWSResponse.InsuredName2
+
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Valid = True
+
+      'pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = oWSResponse.DateOfLoss
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Valid =True
+       'For HK only
+      'pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text = pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text
+      pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text = Format(FormatHKDate(oWSResponse.DateOfLoss), sInternalDateFormat)
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = pxDoc.Fields.ItemByName(FIELD_CM_DATELOSS).Text
+
+      pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Text = oWSResponse.MajorLineOfBusiness
+      pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Valid = True
+      'Set LOB values
+      IsAegisMajorLine (pxDoc)
+
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER).Text = oWSResponse.ExaminerName
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER_CODE).Text = oWSResponse.ExaminerCode
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER_CODE).Valid = True
+      'Set CM Process ID value
+      GetCMProcessID (pxDoc)
+
+      pxDoc.Fields.ItemByName(FIELD_LOSS_LOCATION).Text = oWSResponse.LossLocation
+      pxDoc.Fields.ItemByName(FIELD_LOSS_LOCATION).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_VEHICLE_NUMBER).Text = oWSResponse.VehicleNumber
+      pxDoc.Fields.ItemByName(FIELD_VEHICLE_NUMBER).Valid = True
+
+
+      pxDoc.Fields.ItemByName(FIELD_VESSEL_NAME).Text = oWSResponse.VesselName
+      pxDoc.Fields.ItemByName(FIELD_VESSEL_NAME).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_BILL_OF_LADING).Text = oWSResponse.BillofLadingNo
+      pxDoc.Fields.ItemByName(FIELD_BILL_OF_LADING).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_CERTIFICATE_NUMBER).Text = oWSResponse.CertificateNo
+      pxDoc.Fields.ItemByName(FIELD_CERTIFICATE_NUMBER).Valid = True
+
+      If nFeatureCount > 1 Then
+
+         doNotLookup = True
+
+         MultiFeatureCodeToTable(oWSResponse, pxDoc)
+
+         doNotLookup = False
+      End If
+
+   Else
+      sWebServiceError = oWSResponse.ErrorMessageText
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   sWebServiceError = Err.Description
+   WriteToLogFile("ClaimLookup() Error: " & Err.Number & " - " & Err.Description)
+
+End Sub
+
+Private Sub MultiFeatureCodeToTable(ByVal oClaim As APACKOFAX.ReturnedClaim, ByVal pxDoc As CASCADELib.CscXDocument)
+
+   On Error GoTo ErrorHandler
+
+   Dim n As Integer
+   Dim oTable As CscXDocTable
+
+   Dim nFeature As Integer
+   Dim fd As APACKOFAX.ClientClass
+   Set fd = New APACKOFAX.ClientClass
+
+   nFeature = fd.FeatureRowCount(oClaim)
+
+   For n = 0 To nFeature - 1
+
+      If pxDoc.Fields.Exists(FIELD_LI_AEGIS) = True Then
+
+         Set oTable = pxDoc.Fields.ItemByName(FIELD_LI_AEGIS).Table
+
+         If oTable.Rows.Count = 0 Then
+            oTable.Rows.Insert(n)
+
+         ElseIf  oTable.Rows.Count < n + 1 Then
+            oTable.Rows.Insert(n)
+         End If
+
+         oTable.Rows(n).Cells.ItemByName(COL_FEATURE_CODE).Text = fd.RetrieveFeatureData(oClaim, n, 0, "FeatureCode")
+         oTable.Rows(n).Cells.ItemByName(COL_CLAIMANT_LAST_NAME).Text = fd.RetrieveFeatureData(oClaim, n, 0, "ClaimantLastName")
+         oTable.Rows(n).Cells.ItemByName(COL_CLAIMANT_FIRST_NAME).Text = fd.RetrieveFeatureData(oClaim, n, 0, "ClaimantFirstName")
+         oTable.Rows(n).Cells.ItemByName(COL_MINOR_LINE_OF_BUSINESS).Text = fd.RetrieveFeatureData(oClaim, n, 0, "MinorLineofBusiness")
+         oTable.Rows(n).Cells.ItemByName(COL_DATE_OF_REPORT).Text = fd.RetrieveFeatureData(oClaim, n, 0, "DateOfReport")
+         oTable.Rows(n).Cells.ItemByName(COL_COVERAGE).Text = fd.RetrieveFeatureData(oClaim, n, 0, "Coverage")
+
+      End If
+
+   Next n
+
+Exit Sub
+ErrorHandler:
+   WriteToLogFile("MultiFeatureCodeToTable() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Sub MakeFeatureCodeValid(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   If Trim(pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text) <> "" Then
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Confidence = 1
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).ExtractionConfident = True
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).ErrorDescription = ""
+   End If
+
+End Sub
+
+Private Sub MakeSpecialFolderValid(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   If Trim(pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text) = "" Then
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Confidence = 1
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).ExtractionConfident = True
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).ErrorDescription = ""
+   End If
+
+End Sub
+
+Public Sub ClaimLookupNoSSL(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim oABN As CscXDocField
+   Dim oDom As New DOMDocument60
+   Dim sABN As String
+
+   On Error GoTo ErrorHandler
+
+   CallWebService(oDom, GetWebURL(pxDoc), pxDoc)
+   WriteToLogFile("ClaimLookup() web service call completed")
+
+   If oDom.parseError.errorCode = 0 Then
+
+      WriteToLogFile("ClaimLookup() errorCode = 0; mb_Abort = " & mb_Abort & "; mb_Success = " & mb_Success)
+
+      'If Not mb_Abort And mb_Success Then
+      If mb_Success Then
+
+         WriteToLogFile("ClaimLookup() Success")
+         Call PopulateClaimDetails(pxDoc, oDom)
+
+      Else
+         WriteToLogFile("ClaimLookup() Not Success")
+
+      End If
+   Else
+      WriteToLogFile("ClaimLookup() Error: " & oDom.parseError.srcText & vbCrLf & oDom.parseError.reason)
+      mb_Abort = True
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("ClaimLookup() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+
+Private Function QueryXml(ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   'Create the SOAP Envelope
+   Dim strEnvelope As String
+   Dim sCountryCode As String
+
+   sCountryCode = UCase(getBatchField("CountryCode", pxDoc))
+
+   If UCase(Project.ScriptVariables.ItemByName(SCRIPT_VAR_TEST_MODE).Value) = UCase("True") Then
+      sCountryCode = "ID"
+   Else
+      sCountryCode = UCase(getBatchField("CountryCode", pxDoc))
+   End If
+
+   strEnvelope = "<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/""
+   strEnvelope = strEnvelope + " xmlns:char=""http://www.chartisinsurance.com/gct/services/ChartisClaimDetailsRequest""
+   strEnvelope = strEnvelope +   " xmlns:com=""http://www.chartisinsurance.com/gct/services/commonHeader""> "
+   strEnvelope = strEnvelope +   "<soapenv:Header/>"
+   strEnvelope = strEnvelope +   " <soapenv:Body> "
+   strEnvelope = strEnvelope +   "   <char:ClaimDetailsRequest>"
+   strEnvelope = strEnvelope +   "      <char:requestHeader>"
+   strEnvelope = strEnvelope +   "         <com:id>?</com:id>"
+   strEnvelope = strEnvelope +   "         <com:requestApplicationID>?</com:requestApplicationID>"
+   strEnvelope = strEnvelope +   "         <com:requestMessageID>?</com:requestMessageID>"
+   strEnvelope = strEnvelope +   "         <com:cmdType>?</com:cmdType>"
+   strEnvelope = strEnvelope +   "         <com:cmdMode>?</com:cmdMode>"
+   strEnvelope = strEnvelope +   "         <com:echoBack>False</com:echoBack>"
+   strEnvelope = strEnvelope +   "      </char:requestHeader>"
+   strEnvelope = strEnvelope +   "      <char:applicationContext>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:businessSegment>?</com:businessSegment>"
+   strEnvelope = strEnvelope +   "         <com:country>?</com:country>"
+   strEnvelope = strEnvelope +   "         <com:language>EN</com:language>"
+   strEnvelope = strEnvelope +   "         <com:lineOfBusiness>?</com:lineOfBusiness>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:requestType>?</com:requestType>"
+   strEnvelope = strEnvelope +   "         <com:systemDate>?</com:systemDate>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:timeZone>?</com:timeZone>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:requestProviderVersion>1.0</com:requestProviderVersion>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:providerSystemID>?</com:providerSystemID>"
+   strEnvelope = strEnvelope +   "         <!--Optional:-->"
+   strEnvelope = strEnvelope +   "         <com:providerSystemPassword>?</com:providerSystemPassword>"
+   strEnvelope = strEnvelope +   "      </char:applicationContext>"
+   strEnvelope = strEnvelope +   "      <char:ClaimNumber>" & pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text & "</char:ClaimNumber>"
+   strEnvelope = strEnvelope +   "      <char:CountryCode>" & sCountryCode & "</char:CountryCode>"
+   strEnvelope = strEnvelope +   "      <!--Optional:-->"
+   strEnvelope = strEnvelope +   "      <char:FeatureCode>" & pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text & "</char:FeatureCode>"
+   strEnvelope = strEnvelope +   "      <char:LOB></char:LOB>"   'LOB is not input parameter
+   strEnvelope = strEnvelope +   "   </char:ClaimDetailsRequest>"
+   strEnvelope = strEnvelope +   "</soapenv:Body>"
+   strEnvelope = strEnvelope +   "</soapenv:Envelope>"
+
+   QueryXml = strEnvelope
+   'WriteToLogFile(strEnvelope)
+
+End Function
+
+Private Sub CallWebService(ByRef oDom As DOMDocument60, ByVal Url As String, ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sXML As String
+   Dim strEnvelope As String
+
+   On Error GoTo ErrorHandler
+
+   strEnvelope = QueryXml(pxDoc)
+
+   sXML = SubmitQuery(Url, strEnvelope)
+
+   'If mb_Success And Not mb_Abort Then
+   If mb_Success Then
+      oDom.async = False
+      oDom.resolveExternals = False
+      oDom.validateOnParse = False
+      Call oDom.setProperty("SelectionNamespaces", "xmlns:ns3='http://www.chartisinsurance.com/gct/services/ChartisClaimDetailsResponse' xmlns:soapenv='http://schemas.xmlsoap.org/soap/envelope/'")
+      oDom.loadXML sXML
+      'WriteToLogFile(sXML, False)
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("CallWebService() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Function SubmitQuery(ByVal Url As String, ByVal strEnvelope As String) As String
+
+   Const ErrorPosition As String = "submitQuery"
+   Dim StatusMessage As String
+   Dim response As String
+
+   On Error GoTo ErrorHandler
+
+   Set m_XMLHTTP = New XMLHTTP60
+   m_XMLHTTP.Open "GET", Url, False
+   'm_XMLHTTP.Open "GET", Url, True
+   m_XMLHTTP.setRequestHeader "Content-Type", "text/xml"
+   m_XMLHTTP.send
+
+   'm_XMLHTTP.send (strEnvelope)
+
+   ' Check the response code - 200 is Ok
+   If m_XMLHTTP.status = 200 Then
+
+      m_XMLHTTP.Open "POST", Url, False
+      m_XMLHTTP.setRequestHeader "Content-Type", "text/xml"
+      m_XMLHTTP.send (strEnvelope)
+
+      'WriteToLogFile(m_XMLHTTP.responseText)
+
+      response = m_XMLHTTP.responseText
+      ' Make sure the response isn't html
+      If Not IsHTML(response) Then
+         mb_Success = True
+         SubmitQuery = response
+      Else
+         mb_Success = False
+         StatusMessage = "Error: " & response
+         WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+         SubmitQuery = ""
+         sWebServiceError = StatusMessage
+      End If
+   Else
+      mb_Success = False
+      StatusMessage = "Request Status: " & m_XMLHTTP.statusText & " (" & m_XMLHTTP.status & ")"
+      WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+      SubmitQuery = ""
+      sWebServiceError = StatusMessage
+   End If
+
+   Exit Function
+
+ErrorHandler:
+
+   mb_Abort = True
+   mb_Success = False
+   StatusMessage = "Request Status: " & m_XMLHTTP.statusText & "(" & m_XMLHTTP.status & ")"
+   sWebServiceError = StatusMessage
+   WriteToLogFile("SubmitQuery() Error: " & Err.Number & " - " & Err.Description & vbCrLf & StatusMessage)
+
+End Function
+
+Private Function IsHTML(ByVal Text As String) As Boolean
+   If Len(Text) > 4 Then
+      IsHTML = (InStr(LCase(Text), "html") > 0)
+   Else
+      IsHTML = False
+   End If
+End Function
+
+Private Function IsWebSeviceException(ByRef oDom As DOMDocument60, ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+On Error GoTo ErrorHandler
+
+   Dim sException As String
+   Dim sDisplayError As String
+
+   sException = GetValueFromXML(oDom, "/soapenv:Envelope/soapenv:Body/soapenv:Fault/detail/ErrorInfo/errorCode")
+   sDisplayError = GetValueFromXML(oDom, "/soapenv:Envelope/soapenv:Body/soapenv:Fault/faultstring")
+
+   If sException <> "" Then
+      sWebServiceError = sDisplayError
+      WriteToLogFile("IsWebSeviceException() Error: " & sException)
+      IsWebSeviceException = True
+   Else
+      IsWebSeviceException = False
+   End If
+
+Exit Function
+ErrorHandler:
+   WriteToLogFile("IsWebSeviceException() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function GetValueFromXML(ByVal oDom As DOMDocument60,ByVal Tag As String) As String
+
+   Dim oNode As IXMLDOMNodeList
+
+   On Error GoTo ErrorHandler
+
+   Set oNode = oDom.selectNodes(Tag)
+
+   If oNode.Length = 0 Then
+      GetValueFromXML = ""
+   Else
+      GetValueFromXML = oNode.Item(0).nodeTypedValue
+   End If
+
+   Set oNode = Nothing
+
+   Exit Function
+
+ErrorHandler:
+
+   WriteToLogFile("GetValueFromXML() Error: " & Err.Number & " - " & Err.Description)
+   Set oNode = Nothing
+
+End Function
+
+Private Function GetFeatureValueFromXML(ByVal oDom As DOMDocument60, ByVal Tag As String, ByVal pxDoc As CASCADELib.CscXDocument) As String
+
+   Dim oNode As IXMLDOMNodeList
+
+   On Error GoTo ErrorHandler
+
+   Set oNode = oDom.selectNodes(Tag)
+
+   If oNode.Length = 0 Then
+      GetFeatureValueFromXML = ""
+
+   ElseIf oNode.Length > 1 Then
+
+      PopulateMultiFeatureCode(pxDoc, Tag, oNode)
+
+   Else
+      GetFeatureValueFromXML = oNode.Item(0).nodeTypedValue
+   End If
+
+   Set oNode = Nothing
+
+   Exit Function
+
+ErrorHandler:
+
+   WriteToLogFile("GetFeatureValueFromXML() Error: " & Err.Number & " - " & Err.Description)
+   Set oNode = Nothing
+
+End Function
+
+
+Private Sub PopulateMultiFeatureCode(ByVal pxDoc As CASCADELib.CscXDocument, ByVal Tag As String, ByVal oNode As IXMLDOMNodeList)
+
+   On Error GoTo ErrorHandler
+
+   Dim n As Integer
+   Dim oTable As CscXDocTable
+
+   Dim sChildTag As String
+   sChildTag = Mid(Tag, InStrRev(Tag, ":")+ 1)
+
+   For n = 0 To oNode.Length - 1
+
+      If pxDoc.Fields.Exists(FIELD_LI_AEGIS) = True Then
+
+         Set oTable = pxDoc.Fields.ItemByName(FIELD_LI_AEGIS).Table
+
+         If oTable.Rows.Count = 0 Then
+            oTable.Rows.Insert(n)
+
+         ElseIf  oTable.Rows.Count < n + 1 Then
+            oTable.Rows.Insert(n)
+         End If
+
+         If InStr(sChildTag, Replace(COL_FEATURE_CODE, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_FEATURE_CODE).Text = oNode.Item(n).nodeTypedValue
+         End If
+
+         If InStr(sChildTag, Replace(COL_CLAIMANT_LAST_NAME, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_CLAIMANT_LAST_NAME).Text = oNode.Item(n).nodeTypedValue
+         End If
+
+         If InStr(sChildTag, Replace(COL_CLAIMANT_FIRST_NAME, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_CLAIMANT_FIRST_NAME).Text = oNode.Item(n).nodeTypedValue
+         End If
+
+         If InStr(sChildTag, Replace(COL_MINOR_LINE_OF_BUSINESS, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_MINOR_LINE_OF_BUSINESS).Text = oNode.Item(n).nodeTypedValue
+         End If
+
+          If InStr(sChildTag, Replace(COL_DATE_OF_REPORT, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_DATE_OF_REPORT).Text = oNode.Item(n).nodeTypedValue
+         End If
+
+         If InStr(sChildTag, Replace(COL_COVERAGE, " ", "")) > 0 Then
+             oTable.Rows(n).Cells.ItemByName(COL_COVERAGE).Text = oNode.Item(n).nodeTypedValue
+         End If
+      End If
+
+   Next n
+
+Exit Sub
+ErrorHandler:
+   WriteToLogFile("PopulateMultiFeatureCode() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Private Sub PopulateClaimDetails(ByVal pxDoc As CASCADELib.CscXDocument, ByRef oDom As DOMDocument60)
+
+   Dim oTable As CscXDocTable
+   Dim oRow As CscXDocTableRow
+   Dim sValue As String
+   Dim sFund As String
+   Dim sConcession As String
+   Dim asValues() As String
+   Dim asFunds() As String
+   Dim asConcessions() As String
+   Dim n As Integer
+
+   Dim strMainNode As String
+
+   On Error GoTo ErrorHandler
+
+
+   strMainNode = "/soapenv:Envelope/soapenv:Body/ns3:ClaimDetailsResponse/ns3:ClaimDetails"
+
+   If Not IsWebSeviceException(oDom, pxDoc) Then
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:ClaimNumber")
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text = GetValueFromXML(oDom, strMainNode & "/ns3:AEGISClaimNo")
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:FeatureCode", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Text = pxDoc.Fields.ItemByName(FIELD_AEGIS_FEATURE_CODE).Text
+      pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:ClaimantLastName", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:ClaimantFirstName", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_MINOR_LINE).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:MinorLineofBusiness", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_MINOR_LINE).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:DateOfReport", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_REPORT).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_COVERAGE).Text = GetFeatureValueFromXML(oDom, strMainNode & "/ns3:FeatureDetails/ns3:Coverage", pxDoc)
+      pxDoc.Fields.ItemByName(FIELD_COVERAGE).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:PolicyNo")
+      pxDoc.Fields.ItemByName(FIELD_POLICY_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Text = GetValueFromXML(oDom, strMainNode & "/ns3:InsuredName1")
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_1).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Text = GetValueFromXML(oDom, strMainNode & "/ns3:InsuredName2")
+      pxDoc.Fields.ItemByName(FIELD_INSURED_NAME_2).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = GetValueFromXML(oDom, strMainNode & "/ns3:DateOfLoss")
+      'pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text = FormatDateOfLoss(pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text)
+      pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Valid =True
+
+      pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Text = GetValueFromXML(oDom, strMainNode & "/ns3:MajorLineOfBusiness")
+      pxDoc.Fields.ItemByName(FIELD_MAJOR_LINE).Valid = True
+      'Set LOB values
+      IsAegisMajorLine (pxDoc)
+
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:ExaminerName")
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER_CODE).Text = GetValueFromXML(oDom, strMainNode & "/ns3:ExaminerCode")
+      pxDoc.Fields.ItemByName(FIELD_EXAMINER_CODE).Valid = True
+      'Set CM Process ID value
+      GetCMProcessID (pxDoc)
+
+      pxDoc.Fields.ItemByName(FIELD_LOSS_LOCATION).Text = GetValueFromXML(oDom, strMainNode & "/ns3:LossLocation")
+      pxDoc.Fields.ItemByName(FIELD_LOSS_LOCATION).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_VEHICLE_NUMBER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:VehicleNumber")
+      pxDoc.Fields.ItemByName(FIELD_VEHICLE_NUMBER).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_VESSEL_NAME).Text = GetValueFromXML(oDom, strMainNode & "/ns3:VesselName")
+      pxDoc.Fields.ItemByName(FIELD_VESSEL_NAME).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_BILL_OF_LADING).Text = GetValueFromXML(oDom, strMainNode & "/ns3:BillofLadingNo")
+      pxDoc.Fields.ItemByName(FIELD_BILL_OF_LADING).Valid = True
+
+      pxDoc.Fields.ItemByName(FIELD_CERTIFICATE_NUMBER).Text = GetValueFromXML(oDom, strMainNode & "/ns3:CertificateNo")
+      pxDoc.Fields.ItemByName(FIELD_CERTIFICATE_NUMBER).Valid = True
+
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:SettlingOffice")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:RenewCert")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:DivisionCD")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:AnnStmtCo")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:Effectivedate")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:Effectivedate")
+      'pXDoc.Fields.ItemByName("AEGISClaimNumber").Text = GetValueFromXML(oDom, strMainNode & "/ns3:Expirydate")
+
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("PopulateClaimDetails() Error: " & Err.Number & " - " & Err.Description)
+
+End Sub
+
+Private Function FormatDateOfLoss(ByVal sDate As String) As String
+
+   Dim sDay As String
+   Dim sMonth As String
+   Dim sYear As String
+
+   Dim sReturn As String
+
+   If Len(sDate) > 0 Then
+      sDay = Left(sDate, 2)
+      sMonth = Mid(sDate, 4, 2)
+      sYear = Right(sDate, 4)
+   End If
+
+   sReturn = sDay & "/" & sMonth & "/" & sYear
+   FormatDateOfLoss = sDate
+
+End Function
+
+Public Function GetOneClaimLOB(ByVal pxDoc As CASCADELib.CscXDocument) As Boolean
+
+   Dim sOneclaim As String
+   Dim bOneClaim As Boolean
+
+   Dim sLOBName As String
+   sLOBName = Trim(UCase(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text))
+
+   sOneclaim = SearchKTMDatabaseByCode(sLOBName, DB_LOB, KTM_DB_LOB_COL_CHECKBOX, KTM_DB_LOB_COL_ONECLAIM)
+
+   If Len(sOneclaim) > 0 Then
+      bOneClaim = CBool(sOneclaim)
+   Else
+      bOneClaim = False
+   End If
+
+   WriteToLogFile("GetOneClaimLOB() = " & sOneclaim)
+
+   GetOneClaimLOB = bOneClaim
+
+End Function
+
+Public Sub GetCMProcessID(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sRouting As String
+   sRouting = getBatchField("Routing", pxDoc)
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   Dim sDBWorklist As String
+
+   pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = True
+
+   If Len(sSource) > 0 Then
+      If Len(sRouting) > 0 Then
+
+         sDBWorklist = SearchKTMDatabaseByCode(sRouting, DB_WORKLIST, KTM_DB_WORKLIST_COL_CODE, KTM_DB_WORKLIST_COL_PROCESS_NAME)
+
+         Dim sDBWorkListName As String
+         sDBWorkListName = SearchKTMDatabaseByCode(sRouting, DB_WORKLIST, KTM_DB_WORKLIST_COL_CODE, KTM_DB_WORKLIST_COL_CHECKBOX)
+
+         pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = sDBWorkListName
+         pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = True
+         pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = sDBWorklist
+         pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+      Else
+         'if route ID is FNOL
+         If Len(sCoverSheetLOB) > 0 Then
+            sDBWorklist = SearchKTMDatabaseByCode(sCoverSheetLOB, DB_SHARED_WORKLIST, KTM_DB_SHARED_WORKLIST_COL_LOB, KTM_DB_SHARED_WORKLIST_COL_PROCESSID)
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = sDBWorklist
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+
+            sRouting = SearchKTMDatabaseByCode(sDBWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_PROCESS_NAME, KTM_DB_WORKLIST_COL_CODE)
+            sDBWorkListName = SearchKTMDatabaseByCode(sRouting, DB_WORKLIST, KTM_DB_WORKLIST_COL_CODE, KTM_DB_WORKLIST_COL_CHECKBOX)
+            pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = sDBWorkListName
+            pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = True
+
+         Else
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = False
+            pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = False
+            pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).ErrorDescription = "Worklist Code cannot leave empty"
+         End If
+
+      End If
+   End If
+
+   SetRouteID(pxDoc)
+   SetOneClaimRoutID(pxDoc)
+
+End Sub
+
+
+'Requirement to set the CM PROCESS ID to only Examiner code from Claim Lookup
+'If adjuster is selected
+Public Sub SetRouteID(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   If InStr(UCase(pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text), "EXAMINER") > 0 Then
+      pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = pxDoc.Fields.ItemByName(FIELD_EXAMINER_CODE).Text
+      pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+   End If
+
+End Sub
+
+Public Sub SetOneClaimRoutID(ByVal pxDoc As CASCADELib.CscXDocument)
+
+On Error GoTo ErrorHandler
+
+   Dim sSource As String
+   sSource = Trim(getBatchField("KICService", pxDoc))
+
+   'Scan source, this is to avoid same OC CM process ID apply to all documents in 1 scan batch
+   'OC CM process ID will apply during ktm instance 2
+   If Len(sSource) = 0 Then
+
+      If Project.ScriptExecutionMode = CscScriptModeServer Then
+         If Project.ScriptExecutionInstance = 1 Then
+            Exit Sub
+         End If
+      End If
+
+   End If
+
+   Dim sOCRouteID As String
+
+   Dim sWorklist As String
+   sWorklist = Trim(pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text)
+
+   Dim sAegisWorklist As String
+
+   Dim sLOBName As String
+   sLOBName = Trim(UCase(pxDoc.Fields.ItemByName(FIELD_LOB_CODE).Text))
+
+   'New one claim logic
+   If GetOneClaimLOB(pxDoc) = True Then
+
+      If pxDoc.IndexInFolder = 0 Then
+
+         sOCRouteID = SearchKTMDatabaseByCode(sWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX, KTM_DB_WORKLIST_COL_OC_ROUTEID)
+
+         If InStr(UCase(sWorklist), "EXAMINER") > 0 Then
+
+            If UCase(pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text) <> UCase(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) Then
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = sOCRouteID
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+            End If
+
+         Else
+            'sLOBByWorlist = SearchKTMDatabaseByCode(sWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX, nSearchLOB)
+
+            'FNOL, No Claim number
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = sOCRouteID
+            pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+         End If
+
+      ElseIf pxDoc.IndexInFolder > 0 Then
+
+         sOCRouteID = SearchKTMDatabaseByCode(sWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX, KTM_DB_WORKLIST_COL_OC_ROUTEID)
+         sAegisWorklist = SearchKTMDatabaseByCode(sWorklist, DB_WORKLIST, KTM_DB_WORKLIST_COL_CHECKBOX, KTM_DB_WORKLIST_COL_PROCESS_NAME)
+
+         If UCase(sOCRouteID) <> UCase(sAegisWorklist) Then
+
+            If UCase(pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text) <> UCase(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) Then
+
+               pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = True
+               pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = "DROP FILE"
+
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = "FILE"
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+
+            ElseIf Trim(pxDoc.Fields.ItemByName(FIELD_AEGIS_CLAIM_NO).Text) = "" And Trim(pxDoc.Fields.ItemByName(FIELD_ONECLAIM_NUMBER).Text) = "" Then
+               'FNOL, No Claim number
+               pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Valid = True
+               pxDoc.Fields.ItemByName(FIELD_WORKLIST_CODE).Text = "DROP FILE"
+
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Text = "FILE"
+               pxDoc.Fields.ItemByName(FIELD_CM_PROCESS_ID).Valid = True
+
+            End If
+
+            WriteToLogFile("SetOneClaimRoutID() is Called, doc no: " & pxDoc.IndexInFolder + 1)
+         End If
+
+      End If
+
+
+   End If
+
+   Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("SetOneClaimRoutID() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Public Sub FNOLDefault(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim sRouting As String
+   sRouting = getBatchField("Routing", pxDoc)
+
+   Dim sSource As String
+   sSource = Trim(UCase(getBatchField("KICService", pxDoc)))
+
+   If Len(sSource) > 0 Then
+
+      If Len(sRouting) > 0 Then
+
+      Else
+         'if route ID is FNOL
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Text = Trim(UCase(getBatchField("DocType", pxDoc)))
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).Valid = True
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).ExtractionConfident = True
+         pxDoc.Fields.ItemByName(FIELD_DOCUMENT_TYPE).ErrorDescription = ""
+
+         pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Text = Trim(UCase(getBatchField("Folder", pxDoc)))
+         pxDoc.Fields.ItemByName(FIELD_CLAIM_TYPE).Valid = True
+
+         pxDoc.Fields.ItemByName(FIELD_SUBFOLDER).Text = SUBFOLDER_GEN_CORRESPONDENCE
+         pxDoc.Fields.ItemByName(FIELD_PRIORITY).Text = "999"
+      End If
+
+   End If
+
+End Sub
+
+
+Public Sub ClearWebFields(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   Dim r As Integer
+   Dim fTable As CscXDocTable
+
+   ' Folder fields - AEGIS
+   SetFieldProperty(pxDoc, FIELD_POLICY_NUMBER, True, "")
+   SetFieldProperty(pxDoc, FIELD_INSURED_NAME_1, True, "")
+   SetFieldProperty(pxDoc, FIELD_INSURED_NAME_2, True, "")
+   SetFieldProperty(pxDoc, FIELD_CLAIMANT_FIRST_NAME, True, "")
+   SetFieldProperty(pxDoc, FIELD_CLAIMANT_LAST_NAME, True, "")
+   SetFieldProperty(pxDoc, FIELD_DATE_OF_LOSS, True, "")
+   SetFieldProperty(pxDoc, FIELD_DATE_OF_REPORT, True, "")
+
+   SetFieldProperty(pxDoc, FIELD_CERTIFICATE_NUMBER, True, "")
+   SetFieldProperty(pxDoc, FIELD_EXAMINER, True, "")
+   SetFieldProperty(pxDoc, FIELD_EXAMINER_CODE, True, "")
+   SetFieldProperty(pxDoc, FIELD_VEHICLE_NUMBER, True, "")
+
+   SetFieldProperty(pxDoc, FIELD_VESSEL_NAME, True, "")
+   SetFieldProperty(pxDoc, FIELD_LOSS_LOCATION, True, "")
+   SetFieldProperty(pxDoc, FIELD_ONECLAIM_NUMBER, True, "")
+   SetFieldProperty(pxDoc, FIELD_AEGIS_CLAIM_NO, True, "")
+   SetFieldProperty(pxDoc, FIELD_AEGIS_FEATURE_CODE, True, "")
+
+   SetFieldProperty(pxDoc, FIELD_COVERAGE, True, "")
+   SetFieldProperty(pxDoc, FIELD_MAJOR_LINE, True, "")
+   SetFieldProperty(pxDoc, FIELD_MINOR_LINE, True, "")
+   SetFieldProperty(pxDoc, FIELD_BILL_OF_LADING, True, "")
+
+
+   If pxDoc.Fields.Exists(FIELD_LI_AEGIS) = True Then
+
+      Set fTable = pxDoc.Fields.ItemByName(FIELD_LI_AEGIS).Table
+      If fTable.Rows.Count > 0 Then
+
+         For r = fTable.Rows.Count - 1 To 0 Step -1
+            fTable.Rows.Remove (r)
+         Next r
+      End If
+
+      pxDoc.Fields.ItemByName(FIELD_LI_AEGIS).Table.Valid = True
+   End If
+End Sub
+
+
+Private Sub SetFieldProperty(ByVal pxDoc As CASCADELib.CscXDocument, ByVal sField As String, ByVal bValid As Boolean, sText As String)
+
+   pxDoc.Fields.ItemByName(sField).Text = sText
+   pxDoc.Fields.ItemByName(sField).Valid = bValid
+
+End Sub
+
+
+Private Sub TruncateFields(ByVal pxDoc As CASCADELib.CscXDocument)
+
+   TruncateFieldValue(pxDoc, FIELD_POLICY_NUMBER, 10)
+   TruncateFieldValue(pxDoc, FIELD_INSURED_NAME_1, 90)
+   TruncateFieldValue(pxDoc, FIELD_INSURED_NAME_2, 90)
+   TruncateFieldValue(pxDoc, FIELD_CLAIMANT_FIRST_NAME, 90)
+   TruncateFieldValue(pxDoc, FIELD_CLAIMANT_LAST_NAME, 90)
+   TruncateFieldValue(pxDoc, FIELD_DATE_OF_LOSS, 10)
+   TruncateFieldValue(pxDoc, FIELD_EXAMINER, 45)
+   TruncateFieldValue(pxDoc, FIELD_EXAMINER_CODE, 10)
+   TruncateFieldValue(pxDoc, FIELD_VEHICLE_NUMBER, 10)
+   TruncateFieldValue(pxDoc, FIELD_VESSEL_NAME, 30)
+   TruncateFieldValue(pxDoc, FIELD_LOSS_LOCATION, 90) '???
+   TruncateFieldValue(pxDoc, FIELD_AEGIS_CLAIM_NO, 10)
+   TruncateFieldValue(pxDoc, FIELD_AEGIS_FEATURE_CODE, 3)
+   TruncateFieldValue(pxDoc, FIELD_COVERAGE, 10)  '???
+
+   TruncateFieldValue(pxDoc, FIELD_MAJOR_LINE, 30)
+   TruncateFieldValue(pxDoc, FIELD_MINOR_LINE, 30)
+   TruncateFieldValue(pxDoc, FIELD_BILL_OF_LADING, 20)
+   TruncateFieldValue(pxDoc, FIELD_DATE_OF_REPORT, 10)   '??
+   TruncateFieldValue(pxDoc, FIELD_DATE_RCVD, 10)   '??
+   TruncateFieldValue(pxDoc, FIELD_BATCH_NAME, 32)
+   TruncateFieldValue(pxDoc, FIELD_CLAIM_NUMBER, 12) '--> OC change
+   TruncateFieldValue(pxDoc, FIELD_CM_DOCUMENT_TYPE, 32)
+   TruncateFieldValue(pxDoc, FIELD_SUBFOLDER, 32)
+   TruncateFieldValue(pxDoc, FIELD_PRIORITY, 3)
+   TruncateFieldValue(pxDoc, FIELD_CM_LOB, 3) ''??
+   TruncateFieldValue(pxDoc, FIELD_CM_PROCESS_ID, 32) ''??
+   TruncateFieldValue(pxDoc, FIELD_CM_SCAN_ID, 5) ''??
+
+   TruncateFieldValue(pxDoc, FIELD_CM_DATELOSS, 10)
+   TruncateFieldValue(pxDoc, FIELD_CM_DATEREPORT, 10)
+End Sub
+
+
+Private Sub TruncateFieldValue(ByVal pxDoc As CASCADELib.CscXDocument, ByVal sField As String, ByVal length As Long)
+
+   Dim iLen As Long
+   iLen = Len(Trim(pxDoc.Fields.ItemByName(sField).Text))
+
+   If iLen > length Then
+      pxDoc.Fields.ItemByName(sField).Text = Left(pxDoc.Fields.ItemByName(sField).Text, length)
+   End If
+
+End Sub
+
+
+'-------------------------------------------------------------------------------------
+' SEARCH FUNCTION
+'-------------------------------------------------------------------------------------
+Public Function SearchWords1(ByVal pxDoc As CASCADELib.CscXDocument, ByVal sSearch As String, ByVal sField As String) As Boolean
+
+   On Error GoTo ErrorHandler
+
+
+   Dim SearchStr As String
+   Dim SearchTarget As String
+   Dim Words() As String
+
+   If Trim(sSearch) <> "" Then
+
+      Dim x , y, w As Long
+
+      Dim pFolder As CscXFolder
+      Set pFolder = pxDoc.ParentFolder
+
+      Dim intAlternative, intAlts As Integer
+
+      Dim pProject As New CscProject
+      pProject.RootClass.Locators.Add(KeywordLocator(pxDoc, sSearch, sField))
+
+      Dim pSearchLoc As New CscXDocField
+
+      If pxDoc.Representations.Count > 0 Then
+
+         For w = 0 To pProject.RootClass.Locators.Count - 1
+            pProject.RootClass.Locate(pxDoc, w)
+
+            Set pSearchLoc = pxDoc.Locators(0)
+
+            If pSearchLoc.Name = "Search" Then
+               intAlternative = pSearchLoc.Alternatives.Count
+
+               If intAlternative > 0 Then
+                  For intAlts = 0 To intAlternative - 1
+
+                     If pSearchLoc.Alternatives(intAlts).Confidence > .90 Then
+
+                        With pSearchLoc.Alternatives(intAlts)
+                           pxDoc.Fields.ItemByName(sField).Text = .Text
+                           pxDoc.Fields.ItemByName(sField).Left = .Left
+                           pxDoc.Fields.ItemByName(sField).Top = .Top
+                           pxDoc.Fields.ItemByName(sField).Width = .Width
+                           pxDoc.Fields.ItemByName(sField).Height = .Height
+                           pxDoc.Fields.ItemByName(sField).PageIndex = .PageIndex
+                           pxDoc.Fields.ItemByName(sField).Valid = True
+                        End With
+
+
+                        SearchWords1 = True
+                        Exit For
+                     Else
+                        SearchWords1 = False
+                        Exit For
+                     End If
+                  Next intAlts
+               Else
+                  SearchWords1 = False
+               End If
+            End If
+         Next w
+
+      End If
+
+   End If
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("SearchWords() Error: " & Err.Number & " - " & Err.Description)
+End Function
+Public Function SearchWords(ByVal pxDoc As CASCADELib.CscXDocument, ByVal sSearch As String, ByVal sField As String) As Boolean
+
+   On Error GoTo ErrorHandler
+
+
+
+  Dim i,lineI, pageI As Integer
+ If  pxDoc.Representations.Count > 0 Then
+   For pageI = 0 To pxDoc.Representations.ItemByIndex(0).Pages.Count -1
+      For lineI = 1 To pxDoc.Representations.ItemByIndex(0).Pages.ItemByIndex(pageI).TextLines.Count-2
+       If InStr(UCase( pxDoc.Representations.ItemByIndex(0).Pages.ItemByIndex(pageI).TextLines.Text) , sSearch) > 1 Then
+
+
+               pxDoc.Fields.ItemByName(sField).Text =sSearch
+             SearchWords = True
+            Exit Function
+          Else
+            SearchWords = False
+         End If
+
+
+      Next
+
+
+      Next
+
+
+ End If
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("SearchWords() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+'-------------------------------------------------------------------------------------
+' SEARCH FUNCTION
+'-------------------------------------------------------------------------------------
+Private Function KeywordLocator(ByVal pxDoc As CASCADELib.CscXDocument, ByVal SearchStr As String, ByVal sField As String) As CscLocatorDef
+   Set KeywordLocator = New CscLocatorDef
+   KeywordLocator.Name = "Search"
+   Dim fl As New CscRegExpLib.CscRegExpLocator
+
+   Dim SearchTarget As String
+   Dim Words() As String
+
+   fl.RegularExpressions.Add(SearchStr)
+
+   If InStr(LCase(sField), "date") > 0 Then
+      fl.RegularExpressions(0).IgnoreCase = True
+      fl.RegularExpressions(0).IgnoreBlanks = True
+   Else
+      fl.RegularExpressions(0).IgnoreCase = True
+      fl.RegularExpressions(0).IgnoreBlanks = False
+   End If
+
+   KeywordLocator.AssignLocatorMethod(fl)
+End Function
+
+
+Private Function GetRE(sName As String, sSWIFT As String) As String
+
+On Error GoTo ErrorHandler
+
+   Dim i As Integer
+   i = 1
+
+   Select Case Right(sName,1)
+
+
+   Case "S"
+      Dim iChar As Integer
+      Dim iNum  As Integer
+      Dim iAlpha As Integer
+      Dim sRE As String
+
+      iChar = 0
+      iNum = 0
+      iAlpha = 0
+
+      Do
+         If IsNumeric(Mid(sSWIFT,i,1))Then
+
+               If iNum = 0 And i > 1 Then
+
+                  If iChar > 0 Then
+                     sRE = sRE + "{" + Trim(Str(iChar)) + "}" +"\d"
+                     iChar = 0
+
+                  ElseIf iAlpha > 0 Then
+                     sRE = sRE + "{" + Trim(Str(iAlpha)) + "}" +"\d"
+                     iAlpha = 0
+                  End If
+
+                  iNum = iNum + 1
+               ElseIf iNum = 0 And i = 1 Then
+                   sRE = "\d"
+                   iNum = iNum + 1
+               Else
+
+                  iNum = iNum + 1
+               End If
+
+               If i = Len(sSWIFT) Then
+                  sRE = sRE + "{" + Trim(Str(iNum)) + "}"
+                  iNum = 0
+               End If
+
+         ElseIf (Asc(Mid(sSWIFT,i,1)) >= 65 And Asc(Mid(sSWIFT,i,1)) <= 90) Or _
+               (Asc(Mid(sSWIFT,i,1)) >= 97 And Asc(Mid(sSWIFT,i,1)) <= 122) Then
+
+            If iAlpha = 0 And i > 1 Then
+               sRE = sRE + "{" + Trim(Str(iNum)) + "}" +"[A-Z]"
+               iNum = 0
+               iAlpha = iAlpha + 1
+
+            ElseIf iAlpha = 0 And i = 1 Then
+                sRE = "[A-Z]"
+                iAlpha = iAlpha + 1
+            Else
+
+               iAlpha = iAlpha + 1
+            End If
+
+             If i = Len(sSWIFT)Then
+               sRE = sRE + "{" + Trim(Str(iAlpha)) + "}"
+               iAlpha = 0
+            End If
+
+         ElseIf Asc(Mid(sSWIFT,i,1)) = 32 Then
+            sRE = sRE + "\s"
+
+         Else
+            If iChar = 0 And i > 1 Then
+               sRE = sRE + "{" + Trim(Str(iNum)) + "}" +"."
+               iNum = 0
+               iChar = iChar + 1
+
+            ElseIf iChar = 0 And i = 1 Then
+                sRE = "."
+                iChar = iChar + 1
+            Else
+
+               iChar = iChar + 1
+            End If
+
+            If i = Len(sSWIFT)Then
+               sRE = sRE + "{" + Trim(Str(iChar)) + "}"
+               iChar = 0
+            End If
+         End If
+
+      i = i + 1
+      Loop Until i > Len(sSWIFT)
+
+      If iNum > 0 Then
+         sRE = sRE + "{" + Trim(Str(iNum)) + "}"
+      ElseIf  iChar > 0 Then
+         sRE = sRE + "{" + Trim(Str(iChar)) + "}"
+      ElseIf iAlpha > 0 Then
+         sRE = sRE + "{" + Trim(Str(iAlpha)) + "}"
+      End If
+
+      GetRE = Trim(sRE)
+
+   Case "D"
+            sRE = Trim(sSWIFT)
+            sRE = Replace(sRE,"/","")
+            sRE = Replace(sRE,"\","")
+            sRE = Replace(sRE,"-","")
+            sRE = Replace(sRE,".","")
+
+            If IsNumeric(sRE) And Len(sRE)=6 Then
+                  GetRE = sRE
+
+            ElseIf Not IsNumeric(sRE) Then     'For Swift value Date Expiry that always appended With Place of Expiry
+                  GetRE = Mid(sRE, 1, 6)
+
+            ElseIf IsNumeric(sRE) And Len(sRE)= 8 Then
+                  GetRE = sRE
+
+            ElseIf Not IsNumeric(Left(sRE,1)) Then
+                  GetRE = "Start"
+
+            ElseIf Not IsNumeric(Mid(sRE,3,1)) Then
+                  GetRE = "Mid"
+
+            End If
+
+   Case "A"
+
+         sRE = Trim(sSWIFT)
+         sRE = Replace(sRE, " ", "")
+         sRE = ExtractNumber(sRE)
+
+         GetRE = sRE
+   End Select
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("GetRE() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function GenerateDateRegExPattern(ByVal sValue As String) As String()
+On Error GoTo ErrorHandler
+
+   Dim sRE As String
+   Dim sDay As String
+   Dim sMonth As String
+   Dim sYear As String
+   Dim strMonthAbr As String
+   Dim strYearPrefix As String
+   Dim sDateDelimiter As String
+
+   Dim sDate() As String
+
+   sDateDelimiter = "([\.\-/])?"
+
+   Dim sRegExFormat1, sRegExFormat2, sRegExFormat3 As String
+
+   If Trim(sValue) <> "" Then
+
+      ReDim sDate(8)
+
+      sRE = GetRE("D", sValue)
+
+      sDate(0) = sValue
+
+      Select Case Len(sRE)
+      Case 8
+
+         'YYYYMMDD
+         sDay = Right(sRE,2)
+         sMonth = Mid(sRE,3,2)
+         sYear = Left(sRE,4)
+         sRegExFormat1 = sDay+ "[\.\-/]" + sMonth + "[\.\-/]" +sYear
+
+         sDate(1) = sRegExFormat1
+
+         'DDMMYYYY
+         sDay = Left(sRE,2)
+         sMonth = Mid(sRE,3,2)
+         sYear = Right(sRE,4)
+         sRegExFormat1 = sDay+ "[\.\-/]" + sMonth + "[\.\-/]" +sYear
+
+         sDate(2) = sRegExFormat1
+
+         strMonthAbr = "(" + GetMonthAbr(sMonth) + ")"
+
+         'DDMMM(YY)YY
+         sRegExFormat1 = sDay+ sDateDelimiter + strMonthAbr + sDateDelimiter + sYear
+         sDate(3) = sRegExFormat1
+
+         'MMMDD(YY)YY
+         sRegExFormat1 = strMonthAbr + sDateDelimiter + sDay + sDateDelimiter + sYear
+         sDate(4) = sRegExFormat1
+
+          '(YY)YYMMMDD
+         sRegExFormat1 = sYear + sDateDelimiter + strMonthAbr + sDateDelimiter + sDay
+         sDate(5) = sRegExFormat1
+
+
+         'MMDDYYYY
+
+         sMonth = Left(sRE,2)
+         sDay= Mid(sRE,3,2)
+         sYear = Right(sRE,4)
+         sRegExFormat2 = sDay+ "[\.\-/]" + sMonth + "[\.\-/]" +sYear
+
+         sDate(6) = sRegExFormat1
+
+         GenerateDateRegExPattern = sDate
+      End Select
+
+   Else
+      ReDim sDate(1)
+      sDate(0) = ""
+      GenerateDateRegExPattern = sDate
+   End If
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("GenerateDateRegExPattern() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function GetMonthAbr (ByVal strMonth As String) As String
+On Error GoTo ErrorHandler
+
+   Dim strMonthAbr As String
+
+   Select Case strMonth
+      Case "01"
+
+         strMonthAbr = "Ene|Enero|gen|gennaio|I|Ian|ianuarie|jaan|jaanuar|Jan|Janeiro|Januar"
+         strMonthAbr = strMonthAbr & "|januari|January|janur|janv|janvaris|janvier|leden|Muharram|Oca|Ocak|sau|sausis|sij|sijecanj"
+         strMonthAbr = strMonthAbr & "|styczen|tammi|tammikuuta"
+
+      Case "02"
+
+         strMonthAbr = "Feb|febbraio|febr|Febrero|Februar|februari|februarie|februaris|February"
+         strMonthAbr = strMonthAbr & "|februr|Fev|Fevereiro|f¨¦vr|f¨¦vrier|helmi|helmikuuta|II|luty|nor|Safar|Sub|Subat|vas|vasaris"
+         strMonthAbr = strMonthAbr & "|veebr|veebruar|vel|veljaca"
+
+      Case "03"
+
+         strMonthAbr = strMonthAbr & "brezen|III|kov|kovas|maalis|maaliskuuta|maart|Mar|M?r|March|marec"
+         strMonthAbr = strMonthAbr & "|Maro|mars|Mart|martie|marts|M?rz|marzec|Marzo|mrc|mrcius|mrt|mrts|Mrz|ou|oujak|RabieI"
+
+      Case "04"
+
+         strMonthAbr = "Abr|Abr|Abril|Apr|April|aprile|aprilie|aprilis|aprill|aprl|avr|avril|bal|balandis|duben|huhti"
+         strMonthAbr = strMonthAbr & "|huhtikuuta|IV|kwiecien|Nis|Nisan|pr|prilis|RabieII|tra|travanj"
+
+      Case "05"
+
+         strMonthAbr = "geg|gegue|JumadaI|kveten"
+         strMonthAbr = strMonthAbr & "|mag|maggio|Mai|maijs|Maio|maj|May|Mayis|Mayo|mei|mj|mjus|svi|svibanj|touko|toukokuuta|V"
+
+      Case "06"
+
+         strMonthAbr = "bir|birelis|cerven|czerwiec|giu|giugno|Haz|Haziran|Iun|iunie|jn|jnius|juin|JumadaII|Jun"
+         strMonthAbr = strMonthAbr & "|June|Junho|junho|Juni|junij|junijs|Junio|juuni|kes|keskuuta|lip|lipanj|VI"
+
+      Case "07"
+
+         strMonthAbr = "cervenec|hein|heinkuuta|Iul|iulie|jl|jlius|juil|juillet|Jul|Julho|julho|Juli|julij|julijs|Julio|July"
+         strMonthAbr = strMonthAbr & "|juuli|lie|liepa|lipiec|lug|luglio|Rajab|srp|srpanj|Tem|Temmuz|VII"
+
+      Case "08"
+
+         strMonthAbr = "Ago|Agosto|Agu|Agustos"
+         strMonthAbr = strMonthAbr & "|ao?t|Aug|August|augusti|augusts|augustus|augusztus|avg|avgust|elo|elokuuta|kol|kolovoz"
+         strMonthAbr = strMonthAbr & "|rgp|rugpjutis|Shaaban|sierpien|srpen|VIII"
+
+      Case "09"
+
+         strMonthAbr = "Eyl|Eyll|IX|Ramadan|rgs|rugsejis|ruj|rujan|Sep"
+         strMonthAbr = strMonthAbr & "|sept|September|septembre|septembrie|septembris|Septiembre|Set|Setembro|settembre|syys"
+         strMonthAbr = strMonthAbr & "|syyskuuta|szept|szeptember|wrzesien|zr"
+
+      Case "10"
+
+         strMonthAbr = "Eki|Ekim|lis|listopad|loka|lokakuuta|Oct"
+         strMonthAbr = strMonthAbr & "|October|octobre|octombrie|Octubre|Okt|oktber|Oktober|oktobris|oktoober|ott|ottobre"
+         strMonthAbr = strMonthAbr & "|Out|Outubro|pazdziernik|rjen|Shawwal|spalis|spl|X"
+
+
+      Case "11"
+
+         strMonthAbr = "Kas|Kasim|lap|lapkritis|listopad"
+         strMonthAbr = strMonthAbr & "|marras|marraskuuta|noiembrie|Nov|November|novembris|Novembro|Noviembre|stu|studeni"
+         strMonthAbr = strMonthAbr & "|ThouAlqadah|XI"
+
+      Case "12
+
+         strMonthAbr = "Ara|Aralik|Dec|d¨¦c|December|d¨¦cembre|decembrie|decembris|des|desember"
+         strMonthAbr = strMonthAbr & "|dets|detsember|Dez|Dezember|Dezembro|dic|Dic|dicembre|Diciembre|grd|grudzien|gruodis"
+         strMonthAbr = strMonthAbr & "|joulu|joulukuuta|pro|prosinac|prosinec|ThouAlhajja|XII"
+   End Select
+
+GetMonthAbr = strMonthAbr
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("GetMonthAbr() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Private Function ExtractMonthName(sSWIFT As String) As String
+ On Error GoTo ErrorHandler
+
+   Dim strMonth As String
+   Dim intLength As Integer, intIdx As Integer
+
+   intLength = Len(sSWIFT)
+   For intIdx = 1 To intLength
+
+      If (Asc(Mid$(sSWIFT, intIdx, 1)) >= 65 And  Asc(Mid$(sSWIFT, intIdx, 1)) <= 90) Or _
+         Asc(Mid$(sSWIFT, intIdx, 1)) >= 97 And  Asc(Mid$(sSWIFT, intIdx, 1)) <= 122 Then
+
+         strMonth = strMonth & Mid$(sSWIFT, intIdx, 1)
+      End If
+   Next
+
+   ExtractMonthName = strMonth
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("ExtractMonthName() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function ExtractDay(sSWIFT As String) As String()
+On Error GoTo ErrorHandler
+
+   'Assuming Day always 2 digits, Year always 4 digits
+   Dim strDay, strYear As String
+   Dim strValue(2) As String
+
+   Dim intLength As Integer, intIdx As Integer, intLoc As Integer, intCount1 As Integer, intCount2 As Integer
+
+   intLength = Len(sSWIFT)
+   For intIdx = 1 To intLength
+
+      If (Asc(Mid$(sSWIFT, intIdx, 1)) >= 48 And  Asc(Mid$(sSWIFT, intIdx, 1)) <= 57) Then
+
+         If intLoc = intIdx - 1 Then
+            intCount1 = intCount1 + 1
+            intCount2 = intCount2 + 1
+         ElseIf intLoc = 0 Then
+            intCount1 = 1
+            intCount2 = 1
+         Else
+            intCount2 = intCount2 + 1
+         End If
+
+         If intCount1 > intCount2 Or intCount1 = intCount2 Then
+             strDay = strDay & Mid$(sSWIFT, intIdx, 1)
+             strValue(0) = strDay
+         Else
+
+            strYear = strYear & Mid$(sSWIFT, intIdx, 1)
+            strValue(1) = strYear
+         End If
+
+         intLoc = intIdx
+      End If
+   Next
+
+   ExtractDay = strValue
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("ExtractDay() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function ExtractNumber(sSWIFT As String) As String
+On Error GoTo ErrorHandler
+
+   Dim strNumber As String
+   Dim intLength As Integer, intIdx As Integer
+
+   intLength = Len(sSWIFT)
+   For intIdx = 1 To intLength
+
+      If (Asc(Mid$(sSWIFT, intIdx, 1)) >= 48 And Asc(Mid$(sSWIFT, intIdx, 1)) <= 57) Or _
+         Mid$(sSWIFT, intIdx, 1) = "." Or Mid$(sSWIFT, intIdx, 1) = "," Then
+
+         strNumber = strNumber & Mid$(sSWIFT, intIdx, 1)
+      End If
+   Next
+
+   ExtractNumber = strNumber
+
+   Exit Function
+
+ErrorHandler:
+   WriteToLogFile("ExtractNumber() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+
+Private Sub DetectKeywords(ByVal pxDoc As CASCADELib.CscXDocument, pProject As CscProject)
+   Dim lm As ICscExtractionMethod
+   Set lm = pProject.RootClass.Locators.ItemByName("Search").LocatorMethod
+
+   lm.DetectKeywords(pxDoc,0,0)
+End Sub
+
+
+Public Sub MatchAEGISOnDocument(ByVal pxDoc As CASCADELib.CscXDocument)
+
+On Error GoTo ErrorHandler
+
+ 'CR 21.03.2017 --- seems we want to disable this
+ Exit Sub
+   'end cr
+   Dim bFirstName As Boolean
+   Dim bLastName As Boolean
+   Dim bDateOfLoss As Boolean
+
+   bFirstName = SearchWords1(pxDoc, pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text, FIELD_MATCH_CLAIMANT_FIRST)
+   bLastName = SearchWords1(pxDoc, pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text, FIELD_MATCH_CLAIMANT_LAST)
+   bDateOfLoss = SearchWords1(pxDoc, pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text, FIELD_MATCH_DATEOFLOSS)
+
+   If bFirstName = True Then
+      pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).ErrorDescription = ""
+   Else
+      If Trim(pxDoc.Fields.ItemByName(FIELD_CLAIMANT_FIRST_NAME).Text) <> "" Then
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Valid = False
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).ErrorDescription = "Claimant first name is not found on the document"
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Text = "Not found"
+      Else
+          pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).Valid = True
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_FIRST).ErrorDescription = ""
+      End If
+
+   End If
+
+   If bLastName = True Then
+      pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).ErrorDescription = ""
+   Else
+      If Trim(pxDoc.Fields.ItemByName(FIELD_CLAIMANT_LAST_NAME).Text) <> "" Then
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Valid = False
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).ErrorDescription = "Claimant last name is not found on the document"
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Text = "Not found"
+      Else
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).Valid = True
+         pxDoc.Fields.ItemByName(FIELD_MATCH_CLAIMANT_LAST).ErrorDescription = ""
+      End If
+   End If
+
+   If bDateOfLoss = True Then
+      pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).Valid = True
+      pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).ErrorDescription = ""
+   Else
+      If Trim(pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text) <> "" Then
+
+         Dim sDate() As String
+         sDate = GenerateDateRegExPattern (pxDoc.Fields.ItemByName(FIELD_DATE_OF_LOSS).Text)
+
+         Dim i As Integer
+         Dim bFound As Boolean
+
+         For i = 0 To UBound(sDate) - 1
+            If bFound = False Then
+               If Trim(sDate(i)) <> "" Then
+                  bFound = SearchWords1(pxDoc, sDate(i), FIELD_MATCH_DATEOFLOSS)
+               End If
+            Else
+               Exit For
+            End If
+         Next
+
+         If bFound = True Then
+            pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).Valid = True
+            pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).ErrorDescription = ""
+         Else
+            pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).Valid = False
+            pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).ErrorDescription = "Date of Loss is not found on the document"
+            pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).Text = "Not found"
+         End If
+
+      Else
+         pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).Valid = True
+         pxDoc.Fields.ItemByName(FIELD_MATCH_DATEOFLOSS).ErrorDescription = ""
+      End If
+   End If
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("MatchAEGISOnDocument() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Public Sub SearchDocumentClaim(ByVal pxDoc As CASCADELib.CscXDocument)
+
+On Error GoTo ErrorHandler
+
+Dim n As Long
+Dim pClaimLocator As CscXDocField
+Set pClaimLocator = pxDoc.Locators.ItemByName("FL_ClaimNo")
+
+Dim pFeatureLocator As CscXDocField
+Set pFeatureLocator = pxDoc.Locators.ItemByName("FL_FeatureCode")
+
+Dim pClaimTable As CscXDocTable
+Set pClaimTable = pxDoc.Fields.ItemByName("ClaimList").Table
+
+Dim pWord As CscXDocWord
+
+
+For n = 0 To pClaimLocator.Alternatives.Count - 1
+   If pClaimLocator.Alternatives(n).Confidence > .9 Then
+
+      'If n > 0 Then
+         pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Alternatives.Create()
+      'End If
+
+      pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = pClaimLocator.Alternatives(0).Text
+
+      With pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Alternatives(n)
+         .Text = pClaimLocator.Alternatives(n).Text
+         .Confidence = pClaimLocator.Alternatives(n).Confidence
+         .Top = pClaimLocator.Alternatives(n).Top
+         .Left = pClaimLocator.Alternatives(n).Left
+         .Height = pClaimLocator.Alternatives(n).Height
+         .Width = pClaimLocator.Alternatives(n).Width
+         .PageIndex = pClaimLocator.Alternatives(n).PageIndex
+
+      End With
+
+      pClaimTable.Rows.Insert(n)
+
+      Set pWord = New CscXDocWord
+      With pWord
+         .Text = pClaimLocator.Alternatives(n).Text
+         .Top = pClaimLocator.Alternatives(n).Top
+         .Left = pClaimLocator.Alternatives(n).Left
+
+         .Height = pClaimLocator.Alternatives(n).Height
+         .Width = pClaimLocator.Alternatives(n).Width
+         .PageIndex = pClaimLocator.Alternatives(n).PageIndex
+      End With
+
+
+      pClaimTable.Rows(n).Cells(0).AddWordData(pWord)
+
+   End If
+Next n
+
+If pClaimLocator.Alternatives.Count > 1 Then
+   pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Text = ""
+   pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).ErrorDescription = "Multiple Claim Numbers are found on this batch"
+   pxDoc.Fields.ItemByName(FIELD_CLAIM_NUMBER).Valid = False
+End If
+
+For n = 0 To pFeatureLocator.Alternatives.Count - 1
+   If pFeatureLocator.Alternatives(n).Confidence > .9 Then
+
+      'If n > 0 Then
+         pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Alternatives.Create()
+      'End If
+
+      With pxDoc.Fields.ItemByName(FIELD_FEATURE_CODE).Alternatives(n)
+         .Text = pFeatureLocator.Alternatives(n).Text
+         .Confidence = pFeatureLocator.Alternatives(n).Confidence
+         .Top = pFeatureLocator.Alternatives(n).Top
+         .Left = pFeatureLocator.Alternatives(n).Left
+         .Height = pFeatureLocator.Alternatives(n).Height
+         .Width = pFeatureLocator.Alternatives(n).Width
+         .PageIndex = pFeatureLocator.Alternatives(n).PageIndex
+      End With
+
+   End If
+Next n
+
+
+Exit Sub
+
+ErrorHandler:
+   WriteToLogFile("SearchDocumentClaim() Error: " & Err.Number & " - " & Err.Description)
+End Sub
+
+Public Function IsClaimNumber(ByVal sTargetContent As String) As String
+
+   Dim re, targetString, colmatches, objMatch
+   Dim s1, s2 As String
+
+   Dim bValid As Boolean
+   Dim bValid1, bValid2, bValid3, bValid4, bValid5 As Boolean
+   Dim bValid6, bValid7 As Boolean
+
+   Dim sClaimNo As String
+
+   bValid = False
+
+   Dim objRegExpr As RegExp
+   Set objRegExpr = New RegExp
+
+   objRegExpr.Global = True
+   objRegExpr.IgnoreCase = True
+
+   'Claim number
+   objRegExpr.Pattern = "[A-Z]{1,2}\d{7,8}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid1 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid1 = False
+   End If
+
+   'Claim number + Feature Code
+   objRegExpr.Pattern = "[A-Z]{1,2}\d{7,8}[A-Z]{1}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid2 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid2 = False
+   End If
+
+   'Claim number
+   objRegExpr.Pattern = "\d{9}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid6 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid6 = False
+   End If
+
+   'Claim number + Feature Code
+   objRegExpr.Pattern = "\d{9}[A-Z]{1}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid7 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid7 = False
+   End If
+
+   'OC Claim number + Country Code
+   objRegExpr.Pattern = "\d{10}[A-Z]{2}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid4 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid4 = False
+   End If
+
+   'OC Claim number + Country Code + Feature Code
+   objRegExpr.Pattern = "\d{10}[A-Z]{2}\d{3}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid3 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid3 = False
+   End If
+
+   'Claim number
+   objRegExpr.Pattern = "[A-Z]{3}\d{6}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid4 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid4 = False
+   End If
+
+   'Claim number + Feature Code
+    objRegExpr.Pattern = "[A-Z]{3}\d{6}[A-Z]{1}"
+   If objRegExpr.Test (sTargetContent) = True Then
+      bValid5 = True
+
+      Set colmatches = objRegExpr.Execute(sTargetContent)
+      For Each objMatch In colmatches
+         sClaimNo = objMatch.Value
+      Next
+   Else
+      bValid5 = False
+   End If
+
+   'Claim number + Country Code + feature Code
+   'objRegExpr.Pattern = "\d{10}[a-z]{2}[a-z]{1}\s"
+   'If objRegExpr.Test (sTargetContent) = True Then
+      'bValid4 = True
+
+      'Set colmatches = objRegExpr.Execute(sTargetContent)
+      'For Each objMatch In colmatches
+         'sClaimNo = objMatch.Value
+      'Next
+   'Else
+      'bValid4 = False
+   'End If
+
+   'If bValid1 = True Or bValid2 = True Or bValid3 = True Or bValid4 = True Then
+      'bValid = True
+   'End If
+   IsClaimNumber = sClaimNo
+End Function
+
+
+Private Sub KfxUpdateImagePath(pRoot As CscXFolder, strFieldName As String, eCloseMode As CscBatchCloseMode)
+
+   If (eCloseMode = CscBatchCloseMode.CscBatchCloseFinal) _
+      And (Project.ScriptExecutionMode = CscScriptExecutionMode.CscScriptModeServer Or Project.ScriptExecutionMode = CscScriptExecutionMode.CscScriptModeServerDesign) _
+And (Project.ScriptExecutionInstance = 1) Then
+
+
+      Dim i As Integer
+      Dim pDoc As CscXDocInfo
+      Dim strImageDir As String
+      Dim nBatchID As Long
+      Dim arrOriginalImages() As String
+
+
+      'Commented on 12th mar, this will be handled by KIC FP1 COD FIX2192
+      'HandleTiff2(pRoot)
+
+      strImageDir = pRoot.XValues.ItemByName("AC_IMAGE_DIRECTORY").Value
+      nBatchID = CLng(pRoot.XValues.ItemByName("AC_EXTERNAL_BATCHID").Value)
+
+      strImageDir = strImageDir + "\" + KfxPadZeroString(Hex(nBatchID), 8) + "\200"
+      'WriteToLogFile("strImageDir = " + strImageDir)
+
+      arrOriginalImages = KfxGetOriginalImages(strImageDir)
+
+      For i = 0 To pRoot.DocInfos.Count - 1
+         Set pDoc = pRoot.DocInfos.ItemByIndex(i)
+
+         'LogDebug("pDoc.Filename=" & pDoc.FileName)
+         'LogDebug("pDoc.XSDFilename=" & pDoc.XDocument.XSDFilename)
+         KfxUpdateDocument(pDoc.XDocument, strFieldName, arrOriginalImages)
+      Next
+   End If
+End Sub
+
+
+Private Function HandleTiff2(pRoot As CscXFolder)
+
+On Error GoTo ErrorHandler
+
+   Dim oFile As New FileSystemObject
+   Dim oFolder As Folder
+   Dim oFileTemp As File
+
+   Dim bDelete As Boolean
+
+   Dim sTiffPath As String
+   sTiffPath = UCase(getBatchField("ScriptImage", pRoot.DocInfos(0).XDocument))
+   WriteToLogFile("sTiffPath = " + sTiffPath)
+
+   Dim strImageDir As String
+   Dim nBatchID As Long
+
+   strImageDir = pRoot.XValues.ItemByName("AC_IMAGE_DIRECTORY").Value
+   nBatchID = CLng(pRoot.XValues.ItemByName("AC_EXTERNAL_BATCHID").Value)
+
+   strImageDir = strImageDir + "\" + KfxPadZeroString(Hex(nBatchID), 8) + "\200\"
+
+   WriteToLogFile("strImageDir = " + strImageDir)
+
+   Set oFolder = oFile.GetFolder(sTiffPath)
+
+    For Each oFileTemp In oFolder.Files
+
+      If oFileTemp.Name <> "Thumbs.db" Then
+
+         'Destination folder must ended with "\"
+         oFile.CopyFile(oFileTemp.Path, strImageDir, True)
+         WriteToLogFile("oFileTemp copied = " + oFileTemp.Path)
+
+      End If
+      oFile.DeleteFile(oFileTemp.Path, True)
+      WriteToLogFile("oFileTemp deleted")
+    Next
+
+   'folder name must not ended with "\"
+   sTiffPath = Left(sTiffPath, Len(sTiffPath)-1)
+   oFile.DeleteFolder(sTiffPath, True)
+   WriteToLogFile("Folder deleted")
+
+Exit Function
+
+ErrorHandler:
+   WriteToLogFile("HandleTiff2() Error: " & Err.Number & " - " & Err.Description)
+End Function
+
+Private Function KfxGetOriginalImages(strImageDir As String) As String()
+    Dim oFile As New FileSystemObject
+    Dim oFolder As Folder
+    Dim oFileTemp As File
+    Dim i As Integer
+    Dim arrOriginalFiles() As String
+    Dim strFullFileName As String
+    Dim arrFiles() As String
+    Dim nCount As Integer
+
+    Set oFolder = oFile.GetFolder(strImageDir)
+
+    nCount = 0
+    ReDim arrOriginalFiles(oFolder.Files.Count)
+    'For i = 0 To oFolder.Files.Count
+    For Each oFileTemp In oFolder.Files
+
+        'strFullFileName = oFolder.Files(i).Name
+        strFullFileName = oFileTemp.Path
+        If (InStr(UCase(oFile.GetFileName(strFullFileName)), "ORIGINAL") = 0 And _
+            UCase(oFile.GetExtensionName(strFullFileName)) <> "EML" ) Or _
+            UCase(oFile.GetFileName(strFullFileName)) = "1_ORIGINAL.HTML" Then
+            'Do nothing.
+        Else
+            Dim strTemp As String
+
+            If KfxValidateOriginalFileName(strFullFileName) Then
+               arrOriginalFiles(nCount) = strFullFileName
+               nCount = nCount + 1
+            End If
+        End If
+    Next
+
+    If nCount > 0 Then
+       ReDim arrFiles(nCount - 1)
+       For i = 0 To nCount - 1
+           arrFiles(i) = arrOriginalFiles(i)
+       Next
+
+       KfxGetOriginalImages = arrFiles
+    Else
+       ReDim arrFiles(0)
+       KfxGetOriginalImages = arrFiles
+    End If
+    Set oFile = Nothing
+
+End Function
+
+
+Private Function KfxGetOriginalImagesOLD(strImageDir As String) As String()
+    Dim oFile As New FileSystemObject
+    Dim oFolder As Folder
+    Dim oFileTemp As File
+    Dim i As Integer
+    Dim arrOriginalFiles() As String
+    Dim strFullFileName As String
+    Dim arrFiles() As String
+    Dim nCount As Integer
+
+    Set oFolder = oFile.GetFolder(strImageDir)
+
+    nCount = 0
+    ReDim arrOriginalFiles(oFolder.Files.Count)
+
+
+    'For i = 0 To oFolder.Files.Count
+    For Each oFileTemp In oFolder.Files
+
+        'strFullFileName = oFolder.Files(i).Name
+        strFullFileName = oFileTemp.Path
+        If UCase(oFile.GetExtensionName(strFullFileName)) = "TIF" Or _
+            UCase(oFile.GetExtensionName(strFullFileName)) = "TIFF" Or _
+            UCase(oFile.GetFileName(strFullFileName)) = "1_ORIGINAL.HTML" Then
+            'Do nothing.
+        Else
+            Dim strTemp As String
+
+            If KfxValidateOriginalFileName(strFullFileName) Then
+                arrOriginalFiles(nCount) = strFullFileName
+                nCount = nCount + 1
+            End If
+        End If
+    Next
+
+    If nCount > 0 Then
+       ReDim arrFiles(nCount - 1)
+       For i = 0 To nCount - 1
+           arrFiles(i) = arrOriginalFiles(i)
+       Next
+
+       KfxGetOriginalImagesOLD = arrFiles
+    Else
+       ReDim arrFiles(0)
+       KfxGetOriginalImagesOLD = arrFiles
+    End If
+    Set oFile = Nothing
+
+End Function
+
+Private Function KfxValidateOriginalFileName(strFileName As String) As Boolean
+    Dim nIndex As Integer
+    Dim strFileNumber As String
+    Dim strTemp As String
+    Dim fso As New FileSystemObject
+
+    strTemp = fso.GetFileName(strFileName)
+
+    nIndex = InStr(strTemp, "_")
+
+    If nIndex > 1 Then
+        strFileNumber = Mid(strTemp, 1, nIndex - 1)
+        KfxValidateOriginalFileName = IsNumeric(strFileNumber)
+    Else
+        KfxValidateOriginalFileName = False
+    End If
+
+    Set fso = Nothing
+End Function
+
+
+Private Function KfxPadZeroString(strHex As String, nLength As String) As String
+    Dim strTemp As String
+
+
+    strTemp = strHex
+
+    While Len(strTemp) < nLength
+        strTemp = "0" + strTemp
+    Wend
+
+    KfxPadZeroString = strTemp
+End Function
+
+
+Private Sub KfxUpdateDocument(pDoc As CscXDocument, strFieldName As String, arrOriginalImages() As String)
+
+   If (pDoc.Fields.Exists(strFieldName)) Then
+      If Len(pDoc.Fields.ItemByName(strFieldName).Text) > 0 Then
+         'LogDebug(strFieldName + "=" + pDoc.Fields.ItemByName(strFieldName).Text + ". Don't need to set again.")
+      Else
+         'calculate original Image path.
+         'LogDebug("SourceFileIndex = " + CStr(pDoc.Pages.ItemByIndex(0).SourceFileIndex))
+         Dim strImage As String
+
+         strImage = KfxGetDocumentImage(pDoc, arrOriginalImages)
+         'LogDebug("ImageFile=" & strImage)
+         pDoc.Fields.ItemByName(strFieldName).Text = strImage
+         'WriteToLogFile("KfxUpdateDocument for Doc " & pDoc.IndexInFolder & " = " & pDoc.Fields.ItemByName(strFieldName).Text)
+      End If
+   Else
+      'LogDebug("Field name [" + strFieldName + "] doesn't exist.")
+   End If
+End Sub
+
+
+Private Function KfxGetDocumentImage(pDoc As CscXDocument, arrOriginalImages() As String) As String
+
+   Dim strTemp As String
+   Dim nFileNumber As Integer
+   Dim nFile As Integer
+   Dim i As Integer
+   Dim fso As New FileSystemObject
+
+   KfxGetDocumentImage = ""
+
+   nFileNumber = -1
+   strTemp = fso.GetFileName(pDoc.FileName)
+   i = InStr(strTemp, ".")
+   If i > 1 Then
+      strTemp = Mid(strTemp, 1, i-1)
+      If IsNumeric(strTemp) Then
+         nFileNumber = CInt(strTemp)
+      End If
+   End If
+
+   'LogDebug("nFileNumber=" & CStr(nFileNumber))
+
+   'For i = LBound(arrOriginalImages) To UBound(arrOriginalImages)
+      'nFile = KfxGetFileNumber(arrOriginalImages(i))
+
+      'If nFile = nFileNumber And InStr(LCase(arrOriginalImages(i)), "tif") = 0 Then
+         'KfxGetDocumentImage = arrOriginalImages(i)
+         'Exit For
+
+      'ElseIf InStr(LCase(arrOriginalImages(i)), "tif") > 0 And nFile = pDoc.IndexInFolder + 1 Then
+         'KfxGetDocumentImage = arrOriginalImages(i)
+         'Exit For
+      'End If
+   'Next
+
+   For i = LBound(arrOriginalImages) To UBound(arrOriginalImages)
+      nFile = KfxGetFileNumber(arrOriginalImages(i))
+      If nFile = nFileNumber Then
+         KfxGetDocumentImage = arrOriginalImages(i)
+         Exit For
+      End If
+   Next
+
+End Function
+
+Private Function KfxGetFileNumber(strFileName As String) As Integer
+
+   Dim strTemp As String, strFileNumber As String
+   Dim nIndex As Integer
+
+   Dim fso As New FileSystemObject
+
+   KfxGetFileNumber = -1
+
+    strTemp = fso.GetFileName(strFileName)
+    nIndex = InStr(strTemp, "_")
+
+    If nIndex > 1 Then
+        strFileNumber = Mid(strTemp, 1, nIndex - 1)
+        If IsNumeric(strFileNumber) Then
+            KfxGetFileNumber = CInt(strFileNumber)
+        End If
+    End If
+End Function
+
+
+'Private Sub Application_InitializeScript()
+   'RefreshTextFilePath()
+'End Sub
+
+Private Function RefreshTextFilePath ()
+   On Error GoTo ErrorHandler
+
+   Dim strDB, strDic, strOriDB, strOriDic As String
+   Dim strDBFile, strDicFile As String
+
+   strDB = "\\VMKLCD8CIAPFX1\kfxnp\Dev\CaptureSV\KTM\Chartis HK\Databases"
+   strDic = "\\VMKLCD8CIAPFX1\kfxnp\Dev\CaptureSV\KTM\Chartis HK\Dictionaries"
+
+   Dim iDB, iDic As Integer
+
+   If Project.Databases.Count > 0 Then
+      For iDB = 0 To Project.Databases.Count - 1
+         strOriDB = Project.Databases.ItemByIndex(iDB).ImportFilename
+         strDBFile = Right(strOriDB, Len(strOriDB) - InStrRev(strOriDB, "\") + 1)
+
+         Project.Databases.ItemByIndex(iDB).ImportFilename = strDB + strDBFile
+         Project.Databases.ItemByIndex(iDB).ImportDatabase(True)
+      Next
+   End If
+
+   If Project.Dictionaries.Count > 0 Then
+      For iDic = 0 To Project.Dictionaries.Count - 1
+         strOriDic = Project.Dictionaries.ItemByIndex(iDic).ImportFilename
+         strDicFile = Right(strOriDic, Len(strOriDic) - InStrRev(strOriDic, "\") + 1)
+
+         Project.Dictionaries.ItemByIndex(iDic).ImportFilename = strDic + strDicFile
+         Project.Dictionaries.ItemByIndex(iDic).ImportDictionary
+      Next
+   End If
+
+  Exit Function
+
+ErrorHandler:
+   WriteToLogFile("RefreshTextFilePath() Error: " & Err.Number & " - " & Err.Description)
+End Function
+Public Function  setFieldValid (ByRef pxDoc As CASCADELib.CscXDocument, ByVal sFieldName As String, Optional ByVal sFieldValue As String)
+   'Set Field to valid
+
+   If Len(sFieldValue) > 0 Then
+      If sFieldValue = "deleteme" Then
+          sFieldValue=""
+      End If
+      pxDoc.Fields.ItemByName(sFieldName).Text=sFieldValue
+   End If
+   pxDoc.Fields.ItemByName(sFieldName).Confidence=1
+   pxDoc.Fields.ItemByName(sFieldName).Valid=True
+   pxDoc.Fields.ItemByName(sFieldName).Modified = False
+   pxDoc.Fields.ItemByName(sFieldName).ExtractionConfident=True
+
+End Function
